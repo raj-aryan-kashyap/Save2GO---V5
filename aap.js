@@ -1290,6 +1290,14 @@ window.onload = function() {
         if(typeof toggleItineraryCreationDrawerForm === 'function') toggleItineraryCreationDrawerForm(false);
     });
 
+    // Tapping the tray-specific backdrop (outside the tray card) dismisses the tray
+    const trayBackdropEl = document.getElementById('trayBlurBackdrop');
+    if (trayBackdropEl) {
+        trayBackdropEl.addEventListener('click', () => {
+            if (typeof dismissMapDetailTrayHUDCard === 'function') dismissMapDetailTrayHUDCard();
+        });
+    }
+
     if (travelSpots.length > 0) {
         calculateSmartCityDefaultFilters();
         renderList();

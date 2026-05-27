@@ -44,6 +44,11 @@
 
     <div id="dropdownBlurBackdrop" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[500] hidden transition-all duration-300"></div>
 
+    <!-- Tray-specific backdrop: sits below the bottom nav (z-488 < nav z-490) so the
+         nav tabs stay interactive, but above all map elements and the top HUD (z-50)
+         so everything else is blocked while the info tray is open. -->
+    <div id="trayBlurBackdrop" class="fixed inset-0 bg-slate-950/60 backdrop-blur-md z-[488] hidden transition-opacity duration-300"></div>
+
     <div id="globalToastSpeechBubbleHUD" class="fixed z-[99999] pointer-events-none hidden max-w-[240px] w-full filter drop-shadow-xl h-0 w-0 overflow-visible">
         <div class="bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-700 text-slate-200 text-[11px] font-bold p-3 rounded-2xl text-center relative shadow-2xl leading-relaxed w-[240px]">
             <span id="speechBubbleTextContainer">Message context</span>
@@ -187,87 +192,6 @@
                 </button>
             </div>
             
-            <div id="mapDetailTrayHUD" class="fixed top-1/2 left-4 right-4 -translate-y-1/2 flip-perspective-container bg-transparent z-[999] hidden max-w-md mx-auto h-[480px] pointer-events-auto transition-transform">
-                <div class="flip-card-inner-rotator w-full h-full">
-                    
-                    <div class="flip-card-front-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
-                        <div class="flex justify-between items-start gap-2 shrink-0">
-                            <div>
-                                <div class="flex items-center gap-1.5 flex-wrap">
-                                    <span id="trayCityBadge" class="text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
-                                    <span id="trayStarredBadge" class="hidden text-[9px] font-black text-amber-400"><i class="fa-solid fa-star mr-1"></i>Starred</span>
-                                    <span id="trayBookedBadge" class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
-                                </div>
-                                <h3 id="traySpotTitle" class="text-base font-black text-slate-200 mt-2 truncate max-w-[220px]">Spot Name</h3>
-                            </div>
-                            <div class="flex items-center gap-1.5 shrink-0">
-                                <span id="trayDistanceBadge" class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400">0m</span>
-                                <button onclick="dismissMapDetailTrayHUDCard()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
-                            </div>
-                        </div>
-                        
-                        <div class="flex-1 my-3 bg-slate-950/40 border border-slate-900/60 p-3 rounded-xl overflow-hidden">
-                            <p id="traySpotNotes" class="text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)"></p>
-                        </div>
-                        
-                        <div class="flex flex-col gap-2 shrink-0">
-                            <div class="flex gap-2">
-                                <a id="trayOpenReferenceBtn" href="#" target="_blank" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg">Open Reference</a>
-                                <button id="trayActionBtn" onclick="handleAdaptiveDirectionClick(this, event)" class="px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 gap-1.5"><i class="fa-solid fa-map text-sm"></i> Directions</button>
-                            </div>
-                            <div id="trayTicketRow" class="hidden">
-                                <a id="trayTicketBtn" href="#" target="_blank" class="w-full bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>
-                            </div>
-                            
-                            <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center">
-                                <button id="trayFlipToBackBtn" class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
-                                    <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
-                                </button>
-                                <button id="trayDoneToggleBtn" class="text-xs px-3 py-2 font-bold rounded-lg bg-slate-950 border border-slate-800 text-slate-300 active:bg-slate-800"><i class="fa-solid fa-check mr-1"></i> Mark Done</button>
-                                <button id="trayStarToggleBtn" class="text-xs px-3 py-2 font-black rounded-lg bg-slate-950 border border-slate-800 text-amber-400 active:bg-slate-800"><i class="fa-solid fa-star mr-1"></i> Star</button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="flip-card-back-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
-                        <div class="flex border-b border-slate-800/60 pb-2 shrink-0 items-center justify-between">
-                            <h4 class="text-xs font-black uppercase tracking-wider text-slate-300">Extra Info</h4>
-                        </div>
-
-                        <div class="flex-1 overflow-y-auto subtle-scrollbar space-y-4 pt-3 pr-0.5">
-                            <p id="trayBackLongDescription" class="text-xs text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-100/10 leading-relaxed font-medium">Loading descriptive logs...</p>
-
-                            <div class="space-y-1.5">
-                                    <span class="text-[9px] font-black tracking-widest text-pink-500 block">Itinerary Mapping Tracker</span>
-                                <div id="trayInlineItineraryAssignorRow" class="bg-slate-950 border border-slate-850 p-2 rounded-xl flex items-center justify-between gap-2 text-[10px]">
-                                    <span class="font-bold text-slate-400 uppercase tracking-wider">Map to Schedule:</span>
-                                    <div class="flex gap-1" id="trayItineraryBtnDeck"></div>
-                                </div>
-                            </div>
-
-                            <div class="space-y-1.5">
-                                    <span class="text-[9px] font-black tracking-widest text-slate-500 block">Schedule</span>
-                                <div id="trayBackHoursGrid" class="bg-slate-955/50 border border-slate-100/10 p-2.5 rounded-xl grid grid-cols-1 gap-1 font-mono text-[11px] text-slate-400"></div>
-                            </div>
-
-                            <div id="trayBackBookingWarningCard" class="p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl flex items-start gap-2.5 hidden">
-                                <span class="text-base mt-0.5"><i class="fa-solid fa-calendar-exclamation text-amber-500"></i></span>
-                                <div class="space-y-0.5">
-                                        <h5 class="text-[10px] font-black text-amber-400 tracking-wide">Alert</h5>
-                                    <p id="trayBackBookingValueText" class="text-xs text-slate-300 whitespace-pre-wrap font-medium"></p>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center shrink-0">
-                            <button id="trayFlipToFrontBtn" class="text-slate-400 bg-slate-950 border border-slate-800/80 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-slate-900">
-                                <i class="fa-solid fa-arrow-left mr-1.5"></i> Back
-                            </button>
-                        </div>
-                    </div>
-
-                </div>
-            </div>
         </div>
 
         <div id="view-list" class="view-panel w-full bg-slate-950 flex flex-col overflow-hidden">
@@ -408,8 +332,16 @@
                 </div>
                 <div class="space-y-2">
                     <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Change My Profile Name</label>
-                    <input type="text" id="settingsRenameField" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs text-slate-200 focus:outline-none">
-                    <button onclick="commitProfileRename()" class="w-full py-2 bg-slate-800 rounded-lg text-[11px] font-bold">Update Profile Label</button>
+                    <input type="text" id="settingsRenameField" oninput="validateProfileRenameInput()" placeholder="Enter Your New Name Here" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs text-slate-200 focus:outline-none placeholder-slate-600">
+                    <div id="profileRenameMinCharWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-amber-400/75 pl-0.5">
+                        <i class="fa-solid fa-triangle-exclamation text-[9px]"></i>
+                        <span>Minimum 3 characters required</span>
+                    </div>
+                    <div id="profileRenameNameTakenWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-red-400/80 pl-0.5">
+                        <i class="fa-solid fa-circle-xmark text-[9px]"></i>
+                        <span>Name not available</span>
+                    </div>
+                    <button id="profileRenameSubmitBtn" onclick="commitProfileRename()" disabled class="w-full py-2 bg-slate-800 rounded-lg text-[11px] font-bold opacity-40 cursor-not-allowed transition-all duration-200">Update Profile</button>
                 </div>
                 <hr class="border-slate-800">
                 <div id="settingsSwitchUserSection" class="space-y-2">
@@ -419,11 +351,15 @@
                 </div>
                 <hr class="border-slate-800">
                 <div class="space-y-2">
-                    <button onclick="triggerClearItineraryData()" class="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-500 text-xs font-black uppercase tracking-widest rounded-xl mt-4 hover:bg-red-500/20 transition-colors flex items-center justify-center gap-2">
-                        <i class="fa-solid fa-trash-can"></i> Clear Itinerary Data
+                    <button onclick="triggerClearItineraryData()" class="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500/20 active:scale-95 transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-trash-can"></i> Clear Itinerary
                     </button>
-                    <button onclick="triggerSecureServerHistoryPurgeVault()" class="w-full py-2 bg-red-950/20 text-red-400 border border-red-900/40 text-[11px] font-bold rounded-lg">Purge Cloud Logs</button>
-                    <button onclick="clearDeviceSessionAndLogout()" class="w-full mt-2 py-2 bg-slate-950 border border-slate-800 text-slate-400 text-[11px] font-bold rounded-lg">Logout Session</button>
+                    <button onclick="triggerSecureServerHistoryPurgeVault()" class="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500/20 active:scale-95 transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-server"></i> Purge Cloud Logs
+                    </button>
+                    <button onclick="clearDeviceSessionAndLogout()" class="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500/20 active:scale-95 transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-right-from-bracket"></i> Logout Session
+                    </button>
                     
                     <div id="tileCacheLoaderProgressHUDBox" class="hidden w-full p-3 bg-slate-950 rounded-xl border border-slate-800 flex flex-col gap-1.5 text-[10px] font-bold mt-3">
                         <div class="flex justify-between items-center text-slate-400">
@@ -440,6 +376,88 @@
                 <div id="meta-version" class="text-[9px] font-bold">Version: Loading...</div>
                 <div id="meta-id">Device ID: Loading...</div>
                 <div id="meta-hardware" class="text-[8px]">Specs: Detecting...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ SETTINGS CONFIRM MODAL ═══════════════════════════════════════════
+         Reusable "are you sure?" dialog for Clear Itinerary, Logout, Rename,
+         Switch User. JS calls openSettingsConfirmModal({...}) to configure it.
+    ════════════════════════════════════════════════════════════════════════ -->
+    <div id="settingsConfirmModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[2000] hidden flex items-center justify-center p-6">
+        <div class="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden">
+            <div id="sConfirmTopBar" class="h-0.5 w-full bg-gradient-to-r from-pink-500 to-violet-500"></div>
+            <div class="p-5 pt-4">
+                <!-- X close — returns user to settings drawer -->
+                <button onclick="cancelSettingsConfirmModal()" class="absolute top-3.5 right-3.5 w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold z-10"><i class="fa-solid fa-xmark"></i></button>
+                <!-- Icon + content -->
+                <div class="flex flex-col items-center text-center gap-2 mt-3 mb-5 px-2">
+                    <div class="flex justify-center mb-1">
+                        <div id="sConfirmIconWrap" class="w-12 h-12 rounded-2xl flex items-center justify-center text-xl">
+                            <i id="sConfirmIconEl"></i>
+                        </div>
+                    </div>
+                    <h3 id="sConfirmTitle" class="text-sm font-black text-slate-200 uppercase tracking-wider leading-tight"></h3>
+                    <p id="sConfirmBody" class="text-xs text-slate-400 leading-relaxed font-medium"></p>
+                </div>
+                <!-- Primary action — centered at bottom -->
+                <button id="sConfirmActionBtn" onclick="executeSettingsConfirmAction()" class="w-full py-3 font-black text-xs uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-lg"></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ SETTINGS PURGE PASSWORD MODAL ══════════════════════════════════
+         Dedicated to Purge Cloud Logs — collects admin password inline.
+    ════════════════════════════════════════════════════════════════════════ -->
+    <div id="settingsPurgeModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[2000] hidden flex items-center justify-center p-6">
+        <div class="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden">
+            <div class="h-0.5 w-full bg-gradient-to-r from-red-600 to-rose-500"></div>
+            <div class="p-5 pt-4">
+                <button onclick="cancelSettingsPurgeModal()" class="absolute top-3.5 right-3.5 w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold z-10"><i class="fa-solid fa-xmark"></i></button>
+                <div class="flex flex-col items-center text-center gap-2 mt-3 mb-4 px-2">
+                    <div class="w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-red-500/10 mb-1">
+                        <i class="fa-solid fa-shield-halved text-red-400"></i>
+                    </div>
+                    <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider leading-tight">Secure Area Protocol</h3>
+                    <p class="text-xs text-slate-400 leading-relaxed font-medium">Enter the Master Admin Password to proceed with live server log purges.</p>
+                </div>
+                <!-- Password input -->
+                <input type="password" id="purgePasswordInput" placeholder="Admin password..." autocomplete="off"
+                    class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-red-500/50 placeholder-slate-600 mb-2">
+                <!-- Inline error -->
+                <div id="purgePasswordError" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-red-400/80 pl-0.5 mb-3">
+                    <i class="fa-solid fa-circle-xmark text-[9px]"></i>
+                    <span id="purgePasswordErrorText">Incorrect password. Access denied.</span>
+                </div>
+                <!-- Primary action -->
+                <button id="sPurgeActionBtn" onclick="executePurgeWithPassword()" class="w-full mt-1 py-3 bg-gradient-to-r from-red-600 to-rose-600 font-black text-xs uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-lg shadow-red-600/20">
+                    <i class="fa-solid fa-server mr-1.5"></i>Purge Cloud Logs
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ SETTINGS RESULT MODAL ═══════════════════════════════════════════
+         Generic success / error / info feedback after any settings action.
+    ════════════════════════════════════════════════════════════════════════ -->
+    <div id="settingsResultModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[2001] hidden flex items-center justify-center p-6">
+        <div class="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden">
+            <div id="sResultTopBar" class="h-0.5 w-full bg-gradient-to-r from-pink-500 to-violet-500"></div>
+            <div class="p-5 pt-4">
+                <button onclick="closeSettingsResultModal()" class="absolute top-3.5 right-3.5 w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold z-10"><i class="fa-solid fa-xmark"></i></button>
+                <div class="flex flex-col items-center text-center gap-2 mt-3 mb-5 px-2">
+                    <div class="flex justify-center mb-1">
+                        <div id="sResultIconWrap" class="w-12 h-12 rounded-2xl flex items-center justify-center text-xl">
+                            <i id="sResultIconEl"></i>
+                        </div>
+                    </div>
+                    <h3 id="sResultTitle" class="text-sm font-black text-slate-200 uppercase tracking-wider leading-tight"></h3>
+                    <p id="sResultBody" class="text-xs text-slate-400 leading-relaxed font-medium"></p>
+                </div>
+                <!-- Got It — centered at bottom -->
+                <button onclick="closeSettingsResultModal()" class="w-full py-3 bg-gradient-to-r from-pink-600 to-violet-600 font-black text-xs uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-lg shadow-pink-600/20">
+                    Got It
+                </button>
             </div>
         </div>
     </div>

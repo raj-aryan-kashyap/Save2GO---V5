@@ -320,10 +320,15 @@ function startLiveHardwareGPSTracking() {
             localStorage.setItem('compass_user_live_ts',  Date.now());
 
             updateGpsHudStatus('active', "GPS Active");
-            isCameraLocked = true;
+            // NOTE: do NOT forcefully set isCameraLocked = true here.
+            // Camera lock is an intentional user action (recenter tap / auto-start).
+            // If the user navigated away manually (e.g. magnifying glass city zoom),
+            // isCameraLocked will be false — honour that and update the position
+            // marker silently without hijacking the viewport.
             syncCameraLockVisualUIState();
 
             if (leafletMapInstance) {
+                // Always keep the position marker accurate regardless of lock state
                 if (userPositionPulseCircle) {
                     userPositionPulseCircle.setLatLng([userLat, userLon]);
                 } else {
@@ -345,7 +350,12 @@ function startLiveHardwareGPSTracking() {
                     }).addTo(leafletMapInstance);
                 }
 
-                leafletMapInstance.setView([userLat, userLon], 18);
+                // Only pan the viewport when the user has explicitly locked onto GPS.
+                // This prevents the map snapping back after a magnifying-glass city zoom
+                // or any other intentional manual navigation.
+                if (isCameraLocked) {
+                    leafletMapInstance.setView([userLat, userLon], leafletMapInstance.getZoom());
+                }
             }
         },
         (err) => {
@@ -785,14 +795,16 @@ function renderSingleMarkerElement(spot, latOffset, lonOffset) {
 
 function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
     const tray = document.getElementById('mapDetailTrayHUD');
-    const blurBg = document.getElementById('dropdownBlurBackdrop');
+    // Use the dedicated tray backdrop (z-488) so it sits below the bottom nav
+    // (z-490) — nav tabs stay interactive — while blocking the map and top HUD.
+    const blurBg = document.getElementById('trayBlurBackdrop');
     const plusBtn = document.getElementById('globalFloatingActionPlusButton');
-    
+
     tray.classList.remove('flipped');
 
     const isDone = (spotObj.status || "").toLowerCase().trim() === 'done';
     const ticketLink = spotObj.ticket_url || "";
-    
+
     if (plusBtn) plusBtn.classList.add('hidden');
     if (blurBg) blurBg.classList.remove('hidden');
 
@@ -902,8 +914,12 @@ function dismissMapDetailTrayHUDCard() {
         mapDetailTray.classList.add('hidden');
         mapDetailTray.classList.remove('flipped');
     }
-    const blurBg = document.getElementById('dropdownBlurBackdrop');
-    if (blurBg) blurBg.classList.add('hidden');
+    // Hide the dedicated tray backdrop
+    const trayBg = document.getElementById('trayBlurBackdrop');
+    if (trayBg) trayBg.classList.add('hidden');
+    // Safety net: also clear the shared backdrop in case it was shown by an older call path
+    const sharedBg = document.getElementById('dropdownBlurBackdrop');
+    if (sharedBg) sharedBg.classList.add('hidden');
     const plusBtn = document.getElementById('globalFloatingActionPlusButton');
     if (plusBtn) plusBtn.classList.remove('hidden');
 }
