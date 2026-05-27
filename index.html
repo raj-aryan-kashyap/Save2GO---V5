@@ -47,7 +47,7 @@
     <!-- Tray-specific backdrop: sits below the bottom nav (z-488 < nav z-490) so the
          nav tabs stay interactive, but above all map elements and the top HUD (z-50)
          so everything else is blocked while the info tray is open. -->
-    <div id="trayBlurBackdrop" class="fixed inset-0 bg-slate-950/60 backdrop-blur-md z-[488] hidden transition-opacity duration-300"></div>
+    <div id="trayBlurBackdrop" class="fixed top-0 left-0 right-0 bottom-[76px] bg-slate-950/60 backdrop-blur-md z-[488] hidden transition-opacity duration-300"></div>
 
     <div id="globalToastSpeechBubbleHUD" class="fixed z-[99999] pointer-events-none hidden max-w-[240px] w-full filter drop-shadow-xl h-0 w-0 overflow-visible">
         <div class="bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-700 text-slate-200 text-[11px] font-bold p-3 rounded-2xl text-center relative shadow-2xl leading-relaxed w-[240px]">
@@ -256,6 +256,92 @@
                     </div>
             </div>
             
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         MAP DETAIL INFO TRAY — body-level fixed element so its
+         z-[999] competes at the root stacking context and renders
+         correctly above trayBlurBackdrop (z-488) and below
+         settingsDrawer / userModal (z-999+).
+         ═══════════════════════════════════════════════════════════ -->
+    <div id="mapDetailTrayHUD" class="fixed top-1/2 left-4 right-4 -translate-y-1/2 flip-perspective-container bg-transparent z-[999] hidden max-w-md mx-auto h-[480px] pointer-events-auto transition-transform">
+        <div class="flip-card-inner-rotator w-full h-full">
+            <!-- ── FRONT FACE ── -->
+            <div class="flip-card-front-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
+                <div class="flex justify-between items-start gap-2 shrink-0">
+                    <div>
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                            <span id="trayCityBadge" class="text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
+                            <span id="trayStarredBadge" class="hidden text-[9px] font-black text-amber-400"><i class="fa-solid fa-star mr-1"></i>Starred</span>
+                            <span id="trayBookedBadge" class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
+                        </div>
+                        <h3 id="traySpotTitle" class="text-base font-black text-slate-200 mt-2 truncate max-w-[220px]">Spot Name</h3>
+                    </div>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                        <span id="trayDistanceBadge" class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400">0m</span>
+                        <button onclick="dismissMapDetailTrayHUDCard()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+                    </div>
+                </div>
+                <div class="flex-1 my-3 bg-slate-950/40 border border-slate-900/60 p-3 rounded-xl overflow-hidden">
+                    <p id="traySpotNotes" class="text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none"
+                       ontouchstart="handleNoteTouchStartEvent(event, this.innerText)"
+                       ontouchmove="handleNoteTouchMoveEvent(event)"
+                       ontouchend="handleNoteTouchEndEvent(event)"
+                       onmousedown="handleNoteMouseDownEvent(event, this.innerText)"
+                       onmousemove="handleNoteMouseMoveEvent(event)"
+                       onmouseup="handleNoteMouseUpEvent(event)"></p>
+                </div>
+                <div class="flex flex-col gap-2 shrink-0">
+                    <div class="flex gap-2">
+                        <a id="trayOpenReferenceBtn" href="#" target="_blank" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg">Open Reference</a>
+                        <button id="trayActionBtn" onclick="handleAdaptiveDirectionClick(this, event)" class="px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 gap-1.5"><i class="fa-solid fa-map text-sm"></i> Directions</button>
+                    </div>
+                    <div id="trayTicketRow" class="hidden">
+                        <a id="trayTicketBtn" href="#" target="_blank" class="w-full bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>
+                    </div>
+                    <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center">
+                        <button id="trayFlipToBackBtn" class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
+                            <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
+                        </button>
+                        <button id="trayDoneToggleBtn" class="text-xs px-3 py-2 font-bold rounded-lg bg-slate-950 border border-slate-800 text-slate-300 active:bg-slate-800"><i class="fa-solid fa-check mr-1"></i> Mark Done</button>
+                        <button id="trayStarToggleBtn" class="text-xs px-3 py-2 font-black rounded-lg bg-slate-950 border border-slate-800 text-amber-400 active:bg-slate-800"><i class="fa-solid fa-star mr-1"></i> Star</button>
+                    </div>
+                </div>
+            </div>
+            <!-- ── BACK FACE ── -->
+            <div class="flip-card-back-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
+                <div class="flex border-b border-slate-800/60 pb-2 shrink-0 items-center justify-between">
+                    <h4 class="text-xs font-black uppercase tracking-wider text-slate-300">Extra Info</h4>
+                    <button onclick="dismissMapDetailTrayHUDCard()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="flex-1 overflow-y-auto subtle-scrollbar space-y-4 pt-3 pr-0.5">
+                    <p id="trayBackLongDescription" class="text-xs text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-100/10 leading-relaxed font-medium">Loading descriptive logs...</p>
+                    <div class="space-y-1.5">
+                        <span class="text-[9px] font-black tracking-widest text-pink-500 block">Itinerary Mapping Tracker</span>
+                        <div id="trayInlineItineraryAssignorRow" class="bg-slate-950 border border-slate-850 p-2 rounded-xl flex items-center justify-between gap-2 text-[10px]">
+                            <span class="font-bold text-slate-400 uppercase tracking-wider">Map to Schedule:</span>
+                            <div class="flex gap-1" id="trayItineraryBtnDeck"></div>
+                        </div>
+                    </div>
+                    <div class="space-y-1.5">
+                        <span class="text-[9px] font-black tracking-widest text-slate-500 block">Schedule</span>
+                        <div id="trayBackHoursGrid" class="bg-slate-955/50 border border-slate-100/10 p-2.5 rounded-xl grid grid-cols-1 gap-1 font-mono text-[11px] text-slate-400"></div>
+                    </div>
+                    <div id="trayBackBookingWarningCard" class="p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl flex items-start gap-2.5 hidden">
+                        <span class="text-base mt-0.5"><i class="fa-solid fa-calendar-exclamation text-amber-500"></i></span>
+                        <div class="space-y-0.5">
+                            <h5 class="text-[10px] font-black text-amber-400 tracking-wide">Alert</h5>
+                            <p id="trayBackBookingValueText" class="text-xs text-slate-300 whitespace-pre-wrap font-medium"></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center shrink-0">
+                    <button id="trayFlipToFrontBtn" class="text-slate-400 bg-slate-950 border border-slate-800/80 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-slate-900">
+                        <i class="fa-solid fa-arrow-left mr-1.5"></i> Back
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
