@@ -4,6 +4,7 @@ const BACKEND_URL = API_URL;
 
 // --- GLOBAL SHARED APPLICATION ENGINE MEMORY STATE ---
 let currentUser = localStorage.getItem('compass_user');
+let registeredUsersList = []; // cached from get_users fetch; used for profile rename duplicate check
 let deviceId = localStorage.getItem('compass_device_id') || generateAndSaveDeviceId();
 let travelSpots = JSON.parse(localStorage.getItem('compass_cache')) || [];
 let checkedFilterStateArray = JSON.parse(localStorage.getItem('compass_active_filters')) || [];
@@ -170,23 +171,46 @@ function setupNativePullToRefreshGestures() {
 }
 
 // ----------------- AUTH & SYNC -----------------
+/** Shared helper — renders a users array into both dropdowns at once */
+function _fillUserDropdowns(users) {
+    const optionsHTML = '<option value="">Select User</option>'
+        + users.map(u => `<option value="${u}">${u}</option>`).join('');
+    const loginDrop   = document.getElementById('user-dropdown-select');
+    const settingsDrop = document.getElementById('settingsSwitchUserDropdown');
+    if (loginDrop)    loginDrop.innerHTML    = optionsHTML;
+    if (settingsDrop) {
+        settingsDrop.innerHTML = optionsHTML;
+        if (currentUser) settingsDrop.value = currentUser;
+    }
+}
+
 async function populateUserDropdown() {
-    const select = document.getElementById('user-dropdown-select');
+    // ── Step 1: instant synchronous paint from localStorage cache ──────────
+    // This runs before the async fetch, so the settings dropdown is never
+    // empty even if the user opens it the millisecond after app load.
+    const cachedUsers = JSON.parse(localStorage.getItem('compass_registered_users') || '[]');
+    if (cachedUsers.length > 0) {
+        registeredUsersList = cachedUsers;
+        _fillUserDropdowns(cachedUsers);
+    }
+
+    // ── Step 2: background fetch to refresh the list from the server ────────
     try {
         const response = await fetch(`${BACKEND_URL}?action=get_users`);
         if (!response.ok) throw new Error('Failed to reach server');
-        const users = await response.json();
-        
-        select.innerHTML = '<option value="">Select User</option>';
-        users.forEach(user => {
-            const opt = document.createElement('option');
-            opt.value = user;
-            opt.textContent = user;
-            select.appendChild(opt);
-        });
+        const freshUsers = await response.json();
+
+        registeredUsersList = freshUsers;
+        localStorage.setItem('compass_registered_users', JSON.stringify(freshUsers));
+        _fillUserDropdowns(freshUsers); // silently update both dropdowns
     } catch (err) {
-        console.error("Failed to load users:", err);
-        select.innerHTML = '<option value="">Error: Server Unreachable</option>';
+        console.error('Failed to load users:', err);
+        // If we had nothing from cache either, show the error state
+        if (cachedUsers.length === 0) {
+            const select = document.getElementById('user-dropdown-select');
+            if (select) select.innerHTML = '<option value="">Error: Server Unreachable</option>';
+        }
+        // Settings dropdown keeps whatever cache populated — still usable
     }
 }
 
@@ -221,8 +245,13 @@ async function syncData(isManualForce) {
             calculateSmartCityDefaultFilters(); 
             renderList(); 
             
+            // Only recalculate the viewport if the user has no saved position from a prior
+            // session. Returning users already have the map at the right spot; calling
+            // setView({ reset: true }) again causes an unnecessary black-screen flash.
             if (typeof triggerOptimalLandingViewportRecalculation === 'function') {
-                triggerOptimalLandingViewportRecalculation();
+                const hasSavedPosition = localStorage.getItem('compass_map_state_lat')
+                                      && localStorage.getItem('compass_map_state_lng');
+                if (!hasSavedPosition) triggerOptimalLandingViewportRecalculation();
             }
             if (typeof plotDynamicMarkersOnCanvasMap === 'function') {
                 plotDynamicMarkersOnCanvasMap();
@@ -797,22 +826,25 @@ function renderList() {
     scrollContainerFrame.appendChild(physicalScrollSpacer);
 }
 
-function toggleSettingsMenu(show) { 
+function toggleSettingsMenu(show) {
     const drawer = document.getElementById('settingsDrawer');
-    if (drawer) drawer.classList.toggle('hidden', !show); 
-    
+    if (drawer) drawer.classList.toggle('hidden', !show);
+
     if (show) {
-        const switchUserBox = document.getElementById('settingsSwitchUserDropdown');
+        const switchUserBox    = document.getElementById('settingsSwitchUserDropdown');
         const mainSelectionBox = document.getElementById('user-dropdown-select');
-        
+
         if (switchUserBox && mainSelectionBox) {
-            switchUserBox.innerHTML = mainSelectionBox.innerHTML;
-            if (currentUser) {
-                switchUserBox.value = currentUser;
-                const renameField = document.getElementById('settingsRenameField');
-                if (renameField) renameField.placeholder = currentUser;
+            // If the settings dropdown somehow still has no options (extremely rare —
+            // cache was empty AND fetch not yet done), mirror the login dropdown as a
+            // last-resort fallback.
+            if (switchUserBox.options.length <= 1 && mainSelectionBox.options.length > 1) {
+                switchUserBox.innerHTML = mainSelectionBox.innerHTML;
             }
+            if (currentUser) switchUserBox.value = currentUser;
         }
+        // Reset rename input and validation state each time settings opens
+        resetProfileRenameValidationUI();
     }
 }
 
@@ -836,54 +868,91 @@ function updateNetworkStatusHUD() {
     }
 }
 
-async function commitProfileRename() {
-    const renameField = document.getElementById('settingsRenameField');
-    if (!renameField || !renameField.value.trim()) {
-        alert("Please enter a valid profile name.");
-        return;
-    }
-    
-    const oldName = currentUser || "Global Traveller";
-    const newName = renameField.value.trim();
-    
-    if (oldName === newName) {
-        alert("The new profile name matches your current label.");
-        return;
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+//  SETTINGS MODAL SYSTEM
+//  Three themed modals replace all native alert/confirm/prompt calls that
+//  originate from the settings drawer flow.
+// ═══════════════════════════════════════════════════════════════════════════
 
-    if (!confirm(`Are you sure you want to change your profile identity from "${oldName}" to "${newName}"?`)) return;
+let _sConfirmCb = null; // stored callback for executeSettingsConfirmAction
 
-    try {
-        await fetch(BACKEND_URL, {
-            method: 'POST',
-            mode: 'cors',
-            body: JSON.stringify({
-                action: 'log_name_change',
-                user: newName,
-                oldName: oldName,
-                deviceMeta: cachedHardwareString
-            })
-        });
-    } catch (err) {
-        console.error("Failed to log name change to cloud logs:", err);
-    }
-
-    localStorage.setItem('compass_user', newName);
-    currentUser = newName;
-    renameField.value = '';
-    
-    alert(`Identity profile updated to: ${newName}. Syncing resources...`);
-    toggleSettingsMenu(false);
-    syncData(true);
+/**
+ * Open the reusable confirm modal.
+ * @param {object} cfg - { faIcon, iconBg, iconColor, topBar, title, body,
+ *                         btnLabel, btnClass, callback }
+ */
+function openSettingsConfirmModal(cfg) {
+    document.getElementById('sConfirmIconWrap').className =
+        `w-12 h-12 rounded-2xl flex items-center justify-center text-xl ${cfg.iconBg || 'bg-red-500/10'}`;
+    document.getElementById('sConfirmIconEl').className =
+        `fa-solid ${cfg.faIcon} ${cfg.iconColor || 'text-red-400'}`;
+    document.getElementById('sConfirmTopBar').className =
+        `h-0.5 w-full ${cfg.topBar || 'bg-gradient-to-r from-pink-500 to-violet-500'}`;
+    document.getElementById('sConfirmTitle').textContent = cfg.title;
+    document.getElementById('sConfirmBody').textContent  = cfg.body;
+    const btn = document.getElementById('sConfirmActionBtn');
+    btn.textContent  = cfg.btnLabel;
+    btn.className    = `w-full py-3 ${cfg.btnClass || 'bg-gradient-to-r from-red-600 to-rose-700'} font-black text-xs uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-lg`;
+    _sConfirmCb = cfg.callback || null;
+    document.getElementById('settingsConfirmModal').classList.remove('hidden');
+}
+function closeSettingsConfirmModal() {
+    // Programmatic close (action executed) — settings already handled by callback
+    document.getElementById('settingsConfirmModal').classList.add('hidden');
+    _sConfirmCb = null;
+}
+function cancelSettingsConfirmModal() {
+    // X button dismiss — user cancelled, navigate back to settings drawer
+    closeSettingsConfirmModal();
+    toggleSettingsMenu(true);
+}
+function executeSettingsConfirmAction() {
+    const cb = _sConfirmCb;
+    closeSettingsConfirmModal();
+    if (typeof cb === 'function') cb();
 }
 
-async function triggerSecureServerHistoryPurgeVault() {
-    const adminPassword = prompt("🚨 SECURE AREA PROTOCOL:\n\nEnter the Master Admin Password to proceed with live server database log purges:");
-    if (adminPassword === null) return; 
-    if (!adminPassword.trim()) {
-        alert("Password cannot be blank.");
+/** Purge modal helpers */
+function openSettingsPurgeModal() {
+    const inp = document.getElementById('purgePasswordInput');
+    const err = document.getElementById('purgePasswordError');
+    if (inp) inp.value = '';
+    if (err) err.classList.add('hidden');
+    document.getElementById('settingsPurgeModal').classList.remove('hidden');
+    if (inp) setTimeout(() => inp.focus(), 120);
+}
+function closeSettingsPurgeModal() {
+    // Programmatic close (after action) — no settings reopen needed
+    document.getElementById('settingsPurgeModal').classList.add('hidden');
+    const inp = document.getElementById('purgePasswordInput');
+    if (inp) inp.value = '';
+    document.getElementById('purgePasswordError').classList.add('hidden');
+}
+function cancelSettingsPurgeModal() {
+    // X button dismiss — navigate back to settings drawer
+    closeSettingsPurgeModal();
+    toggleSettingsMenu(true);
+}
+
+/** Execute the purge request once user submits password */
+async function executePurgeWithPassword() {
+    const inp = document.getElementById('purgePasswordInput');
+    const err = document.getElementById('purgePasswordError');
+    const errTxt = document.getElementById('purgePasswordErrorText');
+    const btn = document.getElementById('sPurgeActionBtn');
+
+    const password = inp ? inp.value.trim() : '';
+    if (!password) {
+        errTxt.textContent = 'Password cannot be blank.';
+        err.classList.remove('hidden');
         return;
     }
+
+    // Loading state
+    const origHTML = btn.innerHTML;
+    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-1.5"></i>Purging...';
+    btn.disabled = true;
+    err.classList.add('hidden');
 
     try {
         const response = await fetch(BACKEND_URL, {
@@ -891,32 +960,245 @@ async function triggerSecureServerHistoryPurgeVault() {
             mode: 'cors',
             body: JSON.stringify({
                 action: 'purge_server_history',
-                user: currentUser || "System Admin",
-                password: adminPassword.trim()
+                user: currentUser || 'System Admin',
+                password
             })
         });
-        
         const outcome = await response.json();
-        if (outcome.result === "success") {
-            alert("🚨 CRITICAL SUCCESS:\n\nGoogle Sheets historical server records and log metrics have been fully scrubbed.");
-            toggleSettingsMenu(false);
+
+        closeSettingsPurgeModal();
+        toggleSettingsMenu(false);
+
+        if (outcome.result === 'success') {
             syncData(true);
-        } else if (outcome.result === "auth_failed") {
-            alert("❌ AUTHENTICATION FAILED:\n\nInvalid Admin Password provided.");
+            openSettingsResultModal('success', 'Logs Purged', 'Google Sheets server records and log metrics have been fully scrubbed.');
+        } else if (outcome.result === 'auth_failed') {
+            openSettingsResultModal('error', 'Access Denied', 'Invalid Admin Password. The purge request was rejected.');
         } else {
-            alert("Error: " + (outcome.error || "Unknown response received from cloud ecosystem."));
+            openSettingsResultModal('error', 'Server Error', outcome.error || 'Unknown response received from cloud ecosystem.');
         }
     } catch (err) {
-        console.error("Purge failure:", err);
-        alert("Communication crash. Verify your web app script setup properties.");
+        console.error('Purge failure:', err);
+        closeSettingsPurgeModal();
+        openSettingsResultModal('error', 'Connection Failed', 'Communication crash. Verify your web app script setup.');
+    } finally {
+        btn.innerHTML = origHTML;
+        btn.disabled = false;
     }
 }
 
+/**
+ * Open the generic result / feedback modal.
+ * @param {'success'|'error'|'info'} type
+ */
+function openSettingsResultModal(type, title, body) {
+    const iconWrap = document.getElementById('sResultIconWrap');
+    const iconEl   = document.getElementById('sResultIconEl');
+    const topBar   = document.getElementById('sResultTopBar');
+
+    if (type === 'success') {
+        iconWrap.className = 'w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-emerald-500/10';
+        iconEl.className   = 'fa-solid fa-circle-check text-emerald-400';
+        topBar.className   = 'h-0.5 w-full bg-gradient-to-r from-emerald-500 to-teal-500';
+    } else if (type === 'error') {
+        iconWrap.className = 'w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-red-500/10';
+        iconEl.className   = 'fa-solid fa-circle-xmark text-red-400';
+        topBar.className   = 'h-0.5 w-full bg-gradient-to-r from-red-500 to-rose-500';
+    } else {
+        iconWrap.className = 'w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-slate-700/40';
+        iconEl.className   = 'fa-solid fa-circle-info text-slate-400';
+        topBar.className   = 'h-0.5 w-full bg-gradient-to-r from-pink-500 to-violet-500';
+    }
+
+    document.getElementById('sResultTitle').textContent = title;
+    document.getElementById('sResultBody').textContent  = body;
+    document.getElementById('settingsResultModal').classList.remove('hidden');
+}
+function closeSettingsResultModal() {
+    document.getElementById('settingsResultModal').classList.add('hidden');
+}
+
+// ─── Missing settings action functions ───────────────────────────────────────
+
+/** Clear all saved itinerary data — replaces native confirm/alert */
+function triggerClearItineraryData() {
+    openSettingsConfirmModal({
+        faIcon: 'fa-trash-can', iconBg: 'bg-red-500/10', iconColor: 'text-red-400',
+        topBar: 'h-0.5 w-full bg-gradient-to-r from-red-500 to-rose-500',
+        title: 'Clear Itinerary',
+        body:  'All timeline maps and saved itinerary schedules will be permanently reset. This cannot be undone.',
+        btnLabel: 'Clear All Data',
+        btnClass: 'bg-gradient-to-r from-red-600 to-rose-700',
+        callback: () => {
+            // Reset the in-memory itinerary cache
+            if (typeof itineraryItems !== 'undefined') {
+                itineraryItems = { '1': [], '2': [], '3': [] };
+                localStorage.setItem('compass_itinerary_cache', JSON.stringify(itineraryItems));
+            }
+            // Also wipe saved itineraries list
+            if (typeof savedItineraries !== 'undefined') {
+                savedItineraries = [];
+            }
+            localStorage.removeItem('compass_saved_itineraries');
+            toggleSettingsMenu(false);
+            if (typeof renderItineraryMasterDashboardWorkspace === 'function') {
+                renderItineraryMasterDashboardWorkspace();
+            }
+            openSettingsResultModal('success', 'Itinerary Cleared', 'All itinerary data has been wiped and the timeline has been reset.');
+        }
+    });
+}
+
+/** Switch to the user selected in the settings dropdown */
+function switchUserSessionViaSettings() {
+    const switchBox = document.getElementById('settingsSwitchUserDropdown');
+    if (!switchBox || !switchBox.value) return;
+    const selectedUser = switchBox.value;
+
+    if (selectedUser === currentUser) {
+        openSettingsResultModal('info', 'Already Active', `"${selectedUser}" is already your active profile.`);
+        return;
+    }
+
+    openSettingsConfirmModal({
+        faIcon: 'fa-user-gear', iconBg: 'bg-violet-500/10', iconColor: 'text-violet-400',
+        topBar: 'h-0.5 w-full bg-gradient-to-r from-violet-500 to-pink-500',
+        title: 'Switch User',
+        body:  `Switch active session to "${selectedUser}"? Your cached data will reload for this profile.`,
+        btnLabel: 'Switch Session',
+        btnClass: 'bg-gradient-to-r from-violet-600 to-pink-600',
+        callback: () => {
+            localStorage.setItem('compass_user', selectedUser);
+            currentUser = selectedUser;
+            toggleSettingsMenu(false);
+            syncData(true);
+            openSettingsResultModal('success', 'Session Switched', `Now signed in as "${selectedUser}". Data reloading...`);
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+function validateProfileRenameInput() {
+    const input = document.getElementById('settingsRenameField');
+    const minCharWarn = document.getElementById('profileRenameMinCharWarning');
+    const nameTakenWarn = document.getElementById('profileRenameNameTakenWarning');
+    const submitBtn = document.getElementById('profileRenameSubmitBtn');
+    if (!input || !minCharWarn || !nameTakenWarn || !submitBtn) return;
+
+    const val = input.value.trim();
+
+    if (val.length === 0) {
+        minCharWarn.classList.add('hidden');
+        nameTakenWarn.classList.add('hidden');
+        submitBtn.disabled = true;
+        submitBtn.classList.add('opacity-40', 'cursor-not-allowed');
+        return;
+    }
+
+    if (val.length < 3) {
+        minCharWarn.classList.remove('hidden');
+        nameTakenWarn.classList.add('hidden');
+        submitBtn.disabled = true;
+        submitBtn.classList.add('opacity-40', 'cursor-not-allowed');
+        return;
+    }
+
+    // 3+ chars — hide min-char warning, check for duplicate name
+    minCharWarn.classList.add('hidden');
+    const nameTaken = registeredUsersList.some(u => u.toLowerCase() === val.toLowerCase());
+    if (nameTaken) {
+        nameTakenWarn.classList.remove('hidden');
+        submitBtn.disabled = true;
+        submitBtn.classList.add('opacity-40', 'cursor-not-allowed');
+    } else {
+        nameTakenWarn.classList.add('hidden');
+        submitBtn.disabled = false;
+        submitBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+    }
+}
+
+function resetProfileRenameValidationUI() {
+    const input = document.getElementById('settingsRenameField');
+    const minCharWarn = document.getElementById('profileRenameMinCharWarning');
+    const nameTakenWarn = document.getElementById('profileRenameNameTakenWarning');
+    const submitBtn = document.getElementById('profileRenameSubmitBtn');
+    if (input) input.value = '';
+    if (minCharWarn) minCharWarn.classList.add('hidden');
+    if (nameTakenWarn) nameTakenWarn.classList.add('hidden');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.classList.add('opacity-40', 'cursor-not-allowed');
+    }
+}
+
+function commitProfileRename() {
+    const renameField = document.getElementById('settingsRenameField');
+    if (!renameField || !renameField.value.trim()) return; // button disabled state guards this
+
+    const oldName = currentUser || 'Global Traveller';
+    const newName = renameField.value.trim();
+
+    if (oldName === newName) {
+        openSettingsResultModal('info', 'No Change', 'The new profile name matches your current label.');
+        return;
+    }
+
+    openSettingsConfirmModal({
+        faIcon: 'fa-user-pen', iconBg: 'bg-violet-500/10', iconColor: 'text-violet-400',
+        topBar: 'h-0.5 w-full bg-gradient-to-r from-violet-500 to-pink-500',
+        title: 'Rename Profile',
+        body:  `Change your identity from "${oldName}" to "${newName}"?`,
+        btnLabel: 'Update Profile',
+        btnClass: 'bg-gradient-to-r from-violet-600 to-pink-600',
+        callback: async () => {
+            try {
+                await fetch(BACKEND_URL, {
+                    method: 'POST',
+                    mode: 'cors',
+                    body: JSON.stringify({
+                        action: 'log_name_change',
+                        user: newName,
+                        oldName,
+                        deviceMeta: cachedHardwareString
+                    })
+                });
+            } catch (err) {
+                console.error('Failed to log name change to cloud logs:', err);
+            }
+
+            localStorage.setItem('compass_user', newName);
+            currentUser = newName;
+
+            // Keep cached list accurate for duplicate-check within the session
+            if (!registeredUsersList.includes(newName)) registeredUsersList.push(newName);
+
+            resetProfileRenameValidationUI();
+            toggleSettingsMenu(false);
+            syncData(true);
+            openSettingsResultModal('success', 'Profile Updated', `Identity profile updated to "${newName}". Syncing resources...`);
+        }
+    });
+}
+
+function triggerSecureServerHistoryPurgeVault() {
+    // Opens the themed password modal; all async logic lives in executePurgeWithPassword()
+    openSettingsPurgeModal();
+}
+
 function clearDeviceSessionAndLogout() {
-    if (!confirm("Are you sure you want to drop your active profile context? This resets your local offline registry cache layers completely.")) return;
-    localStorage.clear();
-    alert("Local application sandbox cache destroyed cleanly.");
-    window.location.reload();
+    openSettingsConfirmModal({
+        faIcon: 'fa-right-from-bracket', iconBg: 'bg-red-500/10', iconColor: 'text-red-400',
+        topBar: 'h-0.5 w-full bg-gradient-to-r from-red-500 to-rose-500',
+        title: 'Logout Session',
+        body:  'Your active profile context will be dropped and the local offline registry cache will be fully reset.',
+        btnLabel: 'Logout & Reset',
+        btnClass: 'bg-gradient-to-r from-red-600 to-rose-700',
+        callback: () => {
+            localStorage.clear();
+            window.location.reload();
+        }
+    });
 }
 
 // ----------------- APP INITIALIZATION (MASTER BOOTLOADER) -----------------
@@ -933,11 +1215,13 @@ window.onload = function() {
     if (typeof initLeafletMapEngineCanvas === 'function') initLeafletMapEngineCanvas();
 
     // Auto-start GPS stream if permission was already granted on a previous visit.
-    // This avoids triggering the browser permission prompt on first load for new users
-    // while giving returning users seamless live-tracking from the first frame.
+    // We lock the camera first so the watchPosition callback moves the map to the
+    // user's location on the first fix (the callback won't setView without this).
     if (navigator.permissions) {
         navigator.permissions.query({ name: 'geolocation' }).then(result => {
             if (result.state === 'granted' && typeof startLiveHardwareGPSTracking === 'function') {
+                isCameraLocked = true; // allow first fix to centre the viewport
+                if (typeof syncCameraLockVisualUIState === 'function') syncCameraLockVisualUIState();
                 startLiveHardwareGPSTracking();
             }
         }).catch(() => { /* permissions API unsupported — GPS stays opt-in */ });
@@ -1009,10 +1293,11 @@ window.onload = function() {
     if (travelSpots.length > 0) {
         calculateSmartCityDefaultFilters();
         renderList();
-        
-        if (typeof triggerOptimalLandingViewportRecalculation === 'function') {
-            triggerOptimalLandingViewportRecalculation();
-        }
+
+        // NOTE: intentionally NOT calling triggerOptimalLandingViewportRecalculation here.
+        // The map was already positioned correctly by initLeafletMapEngineCanvas using the
+        // same resolveInitialMapViewState() logic. A second setView({ reset: true }) here
+        // causes a visible black-screen flicker with no benefit.
         if (typeof plotDynamicMarkersOnCanvasMap === 'function') {
             plotDynamicMarkersOnCanvasMap();
         }
@@ -1050,7 +1335,14 @@ window.onload = function() {
          
          const settingsMenu = document.getElementById('settingsDrawer');
          if (settingsMenu && !settingsMenu.classList.contains('hidden')) {
-             if (!event.target.closest('#settingsDrawerContentBody') && !event.target.closest('button[onclick="toggleSettingsMenu(true)"]')) {
+             // Don't close settings while a settings sub-modal is open — those modals
+             // sit above the drawer and their X button handles the back-navigation.
+             const subModalOpen = document.getElementById('settingsConfirmModal')?.classList.contains('hidden') === false
+                               || document.getElementById('settingsPurgeModal')?.classList.contains('hidden') === false
+                               || document.getElementById('settingsResultModal')?.classList.contains('hidden') === false;
+             if (!subModalOpen
+                 && !event.target.closest('#settingsDrawerContentBody')
+                 && !event.target.closest('button[onclick="toggleSettingsMenu(true)"]')) {
                  toggleSettingsMenu(false);
              }
          }
