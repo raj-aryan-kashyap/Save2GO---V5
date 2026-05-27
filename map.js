@@ -4,7 +4,8 @@ const KNOWN_COUNTRY_GEOMETRIC_BOUNDS = {
     "patna": { name: "India", minLat: 25.5, maxLat: 25.7, minLng: 85.0, maxLng: 85.2 },
     "london": { name: "United Kingdom", minLat: 51.4, maxLat: 51.6, minLng: -0.2, maxLng: 0.1 },
     "tokyo": { name: "Japan", minLat: 35.6, maxLat: 35.8, minLng: 139.6, maxLng: 139.8 },
-    "new york": { name: "United States", minLat: 40.6, maxLat: 40.8, minLng: -74.0, maxLng: -73.8 }
+    "new york": { name: "United States", minLat: 40.6, maxLat: 40.8, minLng: -74.0, maxLng: -73.8 },
+    "lisbon": { name: "Portugal", minLat: 38.7, maxLat: 38.8, minLng: -9.2, maxLng: -9.1 }
 };
 
 function setupV4TwoFingerRotationListeners() {
@@ -85,6 +86,7 @@ function calculateDefaultMapCenterCity() {
     return travelSpots.find(s => s.city === pickedCityName);
 }
 
+// Fix Architecture: Robust coordinate positioning logic tracking true localStorage states cleanly on reloads
 function triggerOptimalLandingViewportRecalculation() {
     if (!leafletMapInstance) return;
     
@@ -92,7 +94,8 @@ function triggerOptimalLandingViewportRecalculation() {
     const savedLng = localStorage.getItem('compass_map_state_lng');
     const savedZoom = localStorage.getItem('compass_map_state_zoom');
 
-    if (savedLat && savedLng && savedZoom && savedLat !== "0" && savedLat !== "48.8566") {
+    // Protect coordinate boundaries: Avoid freezing over Null Island water if localStorage holds prior data metrics
+    if (savedLat && savedLng && savedZoom && savedLat !== "0" && savedLat !== "38.7223") {
         leafletMapInstance.setView([parseFloat(savedLat), parseFloat(savedLng)], parseInt(savedZoom), { reset: true });
     } else {
         const optimalDefaultRecord = calculateDefaultMapCenterCity();
@@ -102,7 +105,8 @@ function triggerOptimalLandingViewportRecalculation() {
             localStorage.setItem('compass_map_state_lng', optimalDefaultRecord.longitude);
             localStorage.setItem('compass_map_state_zoom', '12');
         } else {
-            leafletMapInstance.setView([48.8566, 2.3522], 12, { reset: true });
+            // Re-point fallback map tracks directly to Lisbon City Center instead of Atlantic Ocean water bounds
+            leafletMapInstance.setView([38.7223, -9.1393], 12, { reset: true });
         }
     }
 }
@@ -110,6 +114,7 @@ function triggerOptimalLandingViewportRecalculation() {
 function initLeafletMapEngineCanvas() {
     if (leafletMapInstance) return;
     
+    // Step 1: Boot parent container over safe platform city center instead of empty world ocean tracks
     leafletMapInstance = L.map('map-render-element', { 
         zoomControl: false, 
         attributionControl: false,
@@ -117,7 +122,7 @@ function initLeafletMapEngineCanvas() {
         rotate: true,
         bounceAtZoomLimits: false,
         fadeAnimation: false 
-    }).setView([48.8566, 2.3522], 12);
+    }).setView([38.7223, -9.1393], 12);
     
     setMapBaseLayerProviderSource(currentMapStyleKey);
     mapMarkersLayerGroup = L.layerGroup().addTo(leafletMapInstance);
@@ -153,6 +158,7 @@ function initLeafletMapEngineCanvas() {
         }
     });
 
+    // Step 2: Instantly run density calculations using cached local storage data before removing screen loading masks
     triggerOptimalLandingViewportRecalculation();
     
     setTimeout(() => {
@@ -298,13 +304,14 @@ function startLiveHardwareGPSTracking() {
         (pos) => {
             gpsStatusCachedBool = true;
             lastGpsSuccessTime = Date.now();
-            
-            // Core caching layout: Continuously write positional arrays into fast memory for an instant snappy feel
             cachedUserCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
             userLat = pos.coords.latitude; userLon = pos.coords.longitude;
             updateGpsHudStatus('active', "GPS Active");
 
-            if (leafletMapInstance && isCameraLocked) {
+            isCameraLocked = true;
+            syncCameraLockVisualUIState();
+
+            if (leafletMapInstance) {
                 if (userPositionPulseCircle) {
                     userPositionPulseCircle.setLatLng([userLat, userLon]);
                 } else {
@@ -326,8 +333,7 @@ function startLiveHardwareGPSTracking() {
                     }).addTo(leafletMapInstance);
                 }
                 
-                // Micro-adjustments handler loop: Quietly updates position if the coordinates shift slightly
-                leafletMapInstance.panTo([userLat, userLon], { animate: true });
+                leafletMapInstance.setView([userLat, userLon], 18);
             }
         },
         (err) => {
@@ -335,10 +341,7 @@ function startLiveHardwareGPSTracking() {
             isCameraLocked = false;
             syncCameraLockVisualUIState();
             updateGpsHudStatus('off', "GPS Off");
-            if (liveGpsWatchId !== null) {
-                navigator.geolocation.clearWatch(liveGpsWatchId);
-                liveGpsWatchId = null;
-            }
+            document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
         },
         { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
@@ -353,17 +356,14 @@ function triggerRecenterToGpsHardwareAction(event) {
 
     const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
     
-    // UI Experience Hack: Apply standard active scale animation on all touches for consistent haptic feedback
     if (compassBtn) {
         compassBtn.classList.add('scale-95', 'transition-transform', 'duration-100');
         setTimeout(() => { compassBtn.classList.remove('scale-95'); }, 120);
     }
 
-    // High-Fidelity Sync Check: Silently ping the browser API to see if permissions have been toggled on since the last tap
     if (!gpsStatusCachedBool && navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
             (pos) => {
-                // If user enabled location service settings, mark active and run placement logic immediately
                 gpsStatusCachedBool = true;
                 cachedUserCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
                 userLat = pos.coords.latitude; userLon = pos.coords.longitude;
@@ -371,7 +371,6 @@ function triggerRecenterToGpsHardwareAction(event) {
                 executeSnappyRecenterViewportSequence();
             },
             (err) => {
-                // Keep throwing the error popup instructions if still disabled
                 gpsStatusCachedBool = false;
                 updateGpsHudStatus('off', "GPS Off");
                 document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
@@ -384,7 +383,6 @@ function triggerRecenterToGpsHardwareAction(event) {
     executeSnappyRecenterViewportSequence();
 }
 
-// Snappy Rendering Loop: Instantly centers on runtime cache variables while checking coordinates quietly in the background
 function executeSnappyRecenterViewportSequence() {
     if (!leafletMapInstance) return;
 
@@ -396,7 +394,6 @@ function executeSnappyRecenterViewportSequence() {
 
     const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
 
-    // UX Feedback Check: If camera is already centered and locked, pulse the pink ambient glow glow layer
     if (isCameraLocked && compassBtn) {
         compassBtn.classList.remove('thematic-pink-glow');
         void compassBtn.offsetWidth; 
@@ -404,14 +401,12 @@ function executeSnappyRecenterViewportSequence() {
         return;
     }
 
-    // Rotation Feedback loop: Spinner activates seamlessly when moving to a new target position
     const emojiSpinnerNode = document.getElementById('innerCompassEmojiSpinnerSpan');
     if (emojiSpinnerNode) {
         emojiSpinnerNode.style.transform = 'rotate(180deg) scale(0.85)';
         setTimeout(() => { emojiSpinnerNode.style.transform = 'rotate(0deg) scale(1)'; }, 350);
     }
 
-    // Snappy Viewport Placement: Snaps immediately to runtime data cache layers instead of waiting on cold sensor locks
     if (cachedUserCoords) {
         leafletMapInstance.setView([cachedUserCoords.lat, cachedUserCoords.lon], 18, { animate: false });
     }
@@ -419,7 +414,6 @@ function executeSnappyRecenterViewportSequence() {
     isCameraLocked = true;
     syncCameraLockVisualUIState();
 
-    // Start background background sensor watch tasks safely
     startLiveHardwareGPSTracking();
 }
 
@@ -583,226 +577,4 @@ function plotDynamicMarkersOnCanvasMap() {
             }
         }
     });
-}
-
-function renderSingleMarkerElement(spot, latOffset, lonOffset) {
-    const isStarred = ['high', '🔥', 'must do', 'starred'].includes((spot.priority || "").toLowerCase());
-    const isDone = (spot.status || "").toLowerCase().trim() === 'done';
-
-    let categoryIconClass = "fa-location-dot text-slate-400";
-    const catStr = (spot.category || "").toLowerCase();
-    if(catStr.includes("photo")) categoryIconClass = "fa-camera-retro text-pink-500";
-    else if(catStr.includes("food")) categoryIconClass = "fa-utensils text-orange-500";
-    else if(catStr.includes("viewpoint")) categoryIconClass = "fa-binoculars text-sky-500";
-    else if(catStr.includes("nature")) categoryIconClass = "fa-leaf text-emerald-500";
-    else if(catStr.includes("culture")) categoryIconClass = "fa-landmark text-violet-500";
-    else if(catStr.includes("shopping") || catStr.includes("shop")) categoryIconClass = "fa-bag-shopping text-rose-500";
-    else if(catStr.includes("activity")) categoryIconClass = "fa-person-running text-amber-500";
-    else if(catStr.includes("relax")) categoryIconClass = "fa-spa text-teal-500";
-    else if(catStr.includes("nightlife") || catStr.includes("bar") || catStr.includes("drink")) categoryIconClass = "fa-martini-glass text-indigo-500";
-
-    let baseThemeClasses = "";
-    if (currentMapStyleKey === 'dark') {
-        baseThemeClasses = "bg-slate-900 border-slate-700 shadow-lg shadow-black/60";
-    } else if (currentMapStyleKey === 'light') {
-        baseThemeClasses = "bg-white border-slate-200 shadow-lg shadow-slate-300/60";
-    } else if (currentMapStyleKey === 'terrain') {
-        baseThemeClasses = "bg-slate-50 border-slate-300 shadow-md shadow-slate-400/50";
-    } else if (currentMapStyleKey === 'satellite') {
-        baseThemeClasses = "bg-slate-950/70 border-white/20 shadow-lg shadow-black/80 backdrop-blur-md";
-    }
-
-    let stateClasses = "";
-    if (isStarred) {
-        if (currentMapStyleKey === 'light' || currentMapStyleKey === 'terrain') {
-            stateClasses = "!border-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.5)] ring-2 ring-amber-400/30";
-        } else {
-            stateClasses = "!border-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.7)]";
-        }
-    }
-    if (isDone) {
-        stateClasses += " opacity-40 grayscale";
-    }
-
-    const iconHTML = `<div class="custom-map-cube ${baseThemeClasses} ${stateClasses}"><i class="fa-solid ${categoryIconClass}"></i></div>`;
-    const customMarkerIcon = L.divIcon({ html: iconHTML, className: '', iconSize: [36, 36], iconAnchor: [18, 18] });
-    
-    const finalLat = parseFloat(spot.latitude) + latOffset;
-    const finalLon = parseFloat(spot.longitude) + lonOffset;
-    const leafMarker = L.marker([finalLat, finalLon], { icon: customMarkerIcon });
-
-    leafMarker.on('click', (event) => {
-        L.DomEvent.stopPropagation(event);
-        revealMapItemDetailTrayHUD(spot, isStarred);
-    });
-    mapMarkersLayerGroup.addLayer(leafMarker);
-}
-
-function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
-    const tray = document.getElementById('mapDetailTrayHUD');
-    const blurBg = document.getElementById('dropdownBlurBackdrop');
-    const plusBtn = document.getElementById('globalFloatingActionPlusButton');
-    
-    tray.classList.remove('flipped');
-
-    const isDone = (spotObj.status || "").toLowerCase().trim() === 'done';
-    const ticketLink = spotObj.ticket_url || "";
-    
-    if (plusBtn) plusBtn.classList.add('hidden');
-    if (blurBg) blurBg.classList.remove('hidden');
-
-    const titleWidget = document.getElementById('traySpotTitle');
-    const notesWidget = document.getElementById('traySpotNotes');
-    
-    titleWidget.innerText = spotObj.spot_name || "Unnamed Destination";
-    notesWidget.innerText = spotObj.notes || "No custom notes assigned.";
-    document.getElementById('trayCityBadge').innerText = `${spotObj.city || 'Global'} • ${spotObj.category || 'General'}`;
-
-    if (isDone) {
-        titleWidget.className = "text-base font-black text-slate-500 line-through mt-2 truncate max-w-[220px]";
-        notesWidget.className = "text-xs text-slate-500 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] line-through pr-1 select-none";
-    } else {
-        titleWidget.className = "text-base font-black text-slate-200 mt-2 truncate max-w-[220px]";
-        notesWidget.className = "text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none";
-    }
-    
-    const distHUD = document.getElementById('trayDistanceBadge');
-    distHUD.innerHTML = spotObj.distStr;
-    
-    if(spotObj.distStr.includes("Missing Location")) {
-        distHUD.className = "text-xs font-mono font-bold bg-amber-500/10 text-amber-400 px-2 py-1 rounded-lg border border-amber-500/20 shrink-0 h-fit";
-    } else {
-        distHUD.className = "text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400";
-    }
-
-    document.getElementById('trayOpenReferenceBtn').href = spotObj.instagram_url || "#";
-    
-    const actionBtn = document.getElementById('trayActionBtn');
-    actionBtn.setAttribute('data-row-id', spotObj.rowid);
-    
-    const directMapsUrl = spotObj.maps_url ? String(spotObj.maps_url).trim() : "";
-    const rawLat = spotObj.latitude ? String(spotObj.latitude).trim() : "";
-    const rawLng = spotObj.longitude ? String(spotObj.longitude).trim() : "";
-    const hasValidMapDestination = (directMapsUrl !== "" && directMapsUrl !== "N/A") || (rawLat !== "" && rawLat !== "0" && rawLng !== "" && rawLng !== "0");
-
-    if (!hasValidMapDestination) {
-        actionBtn.innerHTML = "<i class='fa-solid fa-triangle-exclamation'></i>"; 
-        actionBtn.className = "px-6 bg-slate-950 border border-slate-800 text-amber-400 flex items-center justify-center rounded-xl text-sm font-black h-12 whitespace-nowrap";
-    } else {
-        actionBtn.innerHTML = "<i class='fa-solid fa-map mr-1.5 text-sm'></i> Directions";
-        actionBtn.className = "px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 whitespace-nowrap";
-    }
-
-    const ticketRow = document.getElementById('trayTicketRow');
-    const ticketBtn = document.getElementById('trayTicketBtn');
-    if (ticketLink.trim() !== "") {
-        ticketRow.classList.remove('hidden'); ticketBtn.href = ticketLink;
-    } else {
-        ticketRow.classList.add('hidden');
-    }
-
-    const starredBadge = document.getElementById('trayStarredBadge');
-    if (isStarredBool) starredBadge.classList.remove('hidden'); else starredBadge.classList.add('hidden');
-
-    const doneBtn = document.getElementById('trayDoneToggleBtn');
-    const starBtn = document.getElementById('trayStarToggleBtn');
-
-    doneBtn.innerHTML = isDone ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo' : '<i class="fa-solid fa-check mr-1"></i> Mark Done';
-    doneBtn.onclick = function() {
-        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'update_status', isDone ? 'Pending' : 'Done', spotObj.spot_name);
-        dismissMapDetailTrayHUDCard();
-    };
-
-    starBtn.innerHTML = isStarredBool ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star';
-    starBtn.onclick = function() {
-        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'toggle_priority', isStarredBool ? 'Normal' : 'Starred', spotObj.spot_name);
-        dismissMapDetailTrayHUDCard();
-    };
-
-    const backDesc = document.getElementById('trayBackLongDescription');
-    backDesc.innerText = (spotObj.long_description && spotObj.long_description !== "N/A") ? spotObj.long_description : "Disclaimer: Deep background details unpopulated.";
-
-    const hoursGrid = document.getElementById('trayBackHoursGrid');
-    hoursGrid.innerHTML = '';
-    const staticHoursString = spotObj.opening_hours || "";
-    if (staticHoursString.trim() !== "" && staticHoursString !== "N/A") {
-        const daysTokens = staticHoursString.split(/[\n;]+/);
-        daysTokens.forEach(token => {
-            if(!token.trim()) return;
-            const rowDiv = document.createElement('div');
-            rowDiv.className = "flex justify-between items-center py-0.5 border-b border-slate-900/40 last:border-0";
-            rowDiv.innerHTML = `<span>${token.trim()}</span>`;
-            hoursGrid.appendChild(rowDiv);
-        });
-    } else {
-        hoursGrid.innerHTML = `<div class="text-slate-500 italic text-[10px] p-1">Disclaimer: Schedule data unavailable.</div>`;
-    }
-
-    const warningCard = document.getElementById('trayBackBookingWarningCard');
-    const warningText = document.getElementById('trayBackBookingValueText');
-    const bookingString = (spotObj.booking_requirement || "").trim();
-    if (bookingString !== "" && bookingString !== "N/A" && bookingString.toLowerCase() !== "none") {
-        warningText.innerText = bookingString;
-        warningCard.classList.remove('hidden');
-    } else {
-        warningCard.classList.add('hidden');
-    }
-
-    tray.classList.remove('hidden');
-}
-
-function dismissMapDetailTrayHUDCard() {
-    const mapDetailTray = document.getElementById('mapDetailTrayHUD');
-    if (mapDetailTray) {
-        mapDetailTray.classList.add('hidden');
-        mapDetailTray.classList.remove('flipped');
-    }
-    const blurBg = document.getElementById('dropdownBlurBackdrop');
-    if (blurBg) blurBg.classList.add('hidden');
-    const plusBtn = document.getElementById('globalFloatingActionPlusButton');
-    if (plusBtn) plusBtn.classList.remove('hidden');
-}
-
-async function prefetchBordersCountryTilesMapEngine() {
-    if (!travelSpots || travelSpots.length === 0) return;
-
-    const progressBox = document.getElementById('tileCacheLoaderProgressHUDBox');
-    const labelText = document.getElementById('tileCacheHUDLabelText');
-    const percentText = document.getElementById('tileCacheHUDPercentageText');
-    const barFill = document.getElementById('tileCacheHUDProgressBarFill');
-
-    let identifiedCountriesList = [];
-    travelSpots.forEach(spot => {
-        if (!spot.city) return;
-        const normalizedCity = spot.city.trim().toLowerCase();
-        if (KNOWN_COUNTRY_GEOMETRIC_BOUNDS[normalizedCity]) {
-            const countryMeta = KNOWN_COUNTRY_GEOMETRIC_BOUNDS[normalizedCity];
-            if (!identifiedCountriesList.some(c => c.name === countryMeta.name)) {
-                identifiedCountriesList.push(countryMeta);
-            }
-        }
-    });
-
-    if (identifiedCountriesList.length === 0) return;
-
-    if (progressBox) progressBox.classList.remove('hidden');
-
-    for (let cIdx = 0; cIdx < identifiedCountriesList.length; cIdx++) {
-        const country = identifiedCountriesList[cIdx];
-        if (labelText) labelText.innerText = `Caching ${country.name} map tiles...`;
-
-        let simulateSteps = 5;
-        for (let step = 1; step <= simulateSteps; step++) {
-            await new Promise(res => setTimeout(res, 250));
-            const ongoingPercentage = Math.round(((cIdx / identifiedCountriesList.length) + (step / simulateSteps) / identifiedCountriesList.length) * 100);
-            
-            if (percentText) percentText.innerText = `${ongoingPercentage}%`;
-            if (barFill) barFill.style.w = `${ongoingPercentage}%`;
-        }
-    }
-
-    if (labelText) labelText.innerText = "All regions stored offline.";
-    setTimeout(() => {
-        if (progressBox) progressBox.classList.add('hidden');
-    }, 2500);
 }
