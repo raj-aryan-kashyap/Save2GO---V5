@@ -1,62 +1,3 @@
-// Dictionary mapping common travel destination cities to macro bounding territories (Lat/Lon range bounds)
-const KNOWN_COUNTRY_GEOMETRIC_BOUNDS = {
-    "paris": { name: "France", minLat: 48.8, maxLat: 48.9, minLng: 2.2, maxLng: 2.4 },
-    "patna": { name: "India", minLat: 25.5, maxLat: 25.7, minLng: 85.0, maxLng: 85.2 },
-    "london": { name: "United Kingdom", minLat: 51.4, maxLat: 51.6, minLng: -0.2, maxLng: 0.1 },
-    "tokyo": { name: "Japan", minLat: 35.6, maxLat: 35.8, minLng: 139.6, maxLng: 139.8 },
-    "new york": { name: "United States", minLat: 40.6, maxLat: 40.8, minLng: -74.0, maxLng: -73.8 },
-    "lisbon": { name: "Portugal", minLat: 38.7, maxLat: 38.8, minLng: -9.2, maxLng: -9.1 }
-};
-
-function setupV4TwoFingerRotationListeners() {
-    if (!ENABLE_MAP_ROTATION) return;
-    const targetElement = document.getElementById('map-render-element');
-    if (!targetElement) return;
-
-    let initialTouchAngle = 0;
-    let baseBearingAngleOnTouchStart = 0;
-    let processingRotationActive = false;
-
-    targetElement.addEventListener('touchstart', (e) => {
-        if (e.touches.length === 2) {
-            processingRotationActive = true;
-            baseBearingAngleOnTouchStart = currentMapBearingAngle;
-            initialTouchAngle = Math.atan2(
-                e.touches[1].pageY - e.touches[0].pageY,
-                e.touches[1].pageX - e.touches[0].pageX
-            ) * 180 / Math.PI;
-        }
-    }, { passive: true });
-
-    targetElement.addEventListener('touchmove', (e) => {
-        if (processingRotationActive && e.touches.length === 2) {
-            const currentTouchAngle = Math.atan2(
-                e.touches[1].pageY - e.touches[0].pageY,
-                e.touches[1].pageX - e.touches[0].pageX
-            ) * 180 / Math.PI;
-            
-            const angleDelta = currentTouchAngle - initialTouchAngle;
-            currentMapBearingAngle = (baseBearingAngleOnTouchStart + angleDelta) % 360;
-            
-            const pane = document.querySelector('.leaflet-map-pane');
-            if (pane) {
-                pane.style.transform = `rotate(${currentMapBearingAngle}deg)`;
-            }
-
-            const innerCompassIcon = document.getElementById('innerCompassEmojiSpinnerSpan');
-            if (innerCompassIcon) {
-                innerCompassIcon.style.transform = `rotate(${-currentMapBearingAngle}deg)`;
-            }
-        }
-    }, { passive: true });
-
-    targetElement.addEventListener('touchend', (e) => {
-        if (e.touches.length < 2) {
-            processingRotationActive = false;
-        }
-    }, { passive: true });
-}
-
 function calculateDefaultMapCenterCity() {
     if (!travelSpots || travelSpots.length === 0) return null;
 
@@ -86,7 +27,6 @@ function calculateDefaultMapCenterCity() {
     return travelSpots.find(s => s.city === pickedCityName);
 }
 
-// Fix Architecture: Robust coordinate positioning logic tracking true localStorage states cleanly on reloads
 function triggerOptimalLandingViewportRecalculation() {
     if (!leafletMapInstance) return;
     
@@ -94,7 +34,6 @@ function triggerOptimalLandingViewportRecalculation() {
     const savedLng = localStorage.getItem('compass_map_state_lng');
     const savedZoom = localStorage.getItem('compass_map_state_zoom');
 
-    // Protect coordinate boundaries: Avoid freezing over Null Island water if localStorage holds prior data metrics
     if (savedLat && savedLng && savedZoom && savedLat !== "0" && savedLat !== "38.7223") {
         leafletMapInstance.setView([parseFloat(savedLat), parseFloat(savedLng)], parseInt(savedZoom), { reset: true });
     } else {
@@ -105,7 +44,6 @@ function triggerOptimalLandingViewportRecalculation() {
             localStorage.setItem('compass_map_state_lng', optimalDefaultRecord.longitude);
             localStorage.setItem('compass_map_state_zoom', '12');
         } else {
-            // Re-point fallback map tracks directly to Lisbon City Center instead of Atlantic Ocean water bounds
             leafletMapInstance.setView([38.7223, -9.1393], 12, { reset: true });
         }
     }
@@ -114,7 +52,6 @@ function triggerOptimalLandingViewportRecalculation() {
 function initLeafletMapEngineCanvas() {
     if (leafletMapInstance) return;
     
-    // Step 1: Boot parent container over safe platform city center instead of empty world ocean tracks
     leafletMapInstance = L.map('map-render-element', { 
         zoomControl: false, 
         attributionControl: false,
@@ -148,19 +85,12 @@ function initLeafletMapEngineCanvas() {
                     plotDynamicMarkersOnCanvasMap();
                 });
             }
-
-            if (mapTileCleanupTimerId) clearTimeout(mapTileCleanupTimerId);
-            mapTileCleanupTimerId = setTimeout(() => {
-                if (activeBaseTileLayer && typeof activeBaseTileLayer._pruneTiles === 'function') {
-                    activeBaseTileLayer._pruneTiles();
-                }
-            }, 10000);
         }
     });
 
-    // Step 2: Instantly run density calculations using cached local storage data before removing screen loading masks
     triggerOptimalLandingViewportRecalculation();
     
+    // Smooth Veil Reveal Loop: Safe calibration sequence removes the loading curtain overlay cleanly
     setTimeout(() => {
         if (leafletMapInstance) {
             window.requestAnimationFrame(() => {
@@ -179,10 +109,6 @@ function initLeafletMapEngineCanvas() {
             });
         }
     }, 1500);
-
-    const initialZoomLevel = leafletMapInstance.getZoom();
-    const debugNode = document.getElementById('mapZoomDebugHUD');
-    if (debugNode) debugNode.innerText = `Zoom: ${initialZoomLevel}`;
 }
 
 function setMapBaseLayerProviderSource(styleKey) {
@@ -190,14 +116,7 @@ function setMapBaseLayerProviderSource(styleKey) {
     if(activeBaseTileLayer) leafletMapInstance.removeLayer(activeBaseTileLayer);
 
     let providerUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-    
-    let attributionMeta = { 
-        maxZoom: 20,
-        preload: true,
-        keepBuffer: 4, 
-        updateWhenIdle: false, 
-        updateWhenZooming: false
-    };
+    let attributionMeta = { maxZoom: 20, preload: true, keepBuffer: 4 };
     let visibleLabel = "Style: Dark";
 
     if(styleKey === 'light') {
@@ -219,20 +138,6 @@ function setMapBaseLayerProviderSource(styleKey) {
     const displayLabelNode = document.getElementById('activeLayerDisplayLabel');
     if(displayLabelNode) displayLabelNode.innerText = visibleLabel;
 
-    ['dark', 'light', 'terrain', 'satellite'].forEach(k => {
-        const card = document.getElementById(`styleCard-${k}`);
-        if(card) {
-            if(k === styleKey) {
-                card.className = "flex flex-col items-center gap-1 p-1 bg-slate-900 rounded-xl border-2 border-pink-500 shadow-lg scale-105 transform duration-150";
-            } else {
-                card.className = "flex flex-col items-center gap-1 p-1 bg-slate-950 rounded-xl border border-slate-800/80 hover:bg-slate-900 transition-all duration-150 opacity-70";
-            }
-        }
-    });
-
-    const deck = document.getElementById('mapLayerStyleDropdownDeck');
-    if(deck) deck.classList.add('hidden');
-    
     if (mapMarkersLayerGroup && travelSpots.length > 0) {
         plotDynamicMarkersOnCanvasMap();
     }
@@ -266,25 +171,7 @@ function updateGpsHudStatus(statusKey, labelText) {
 
 function handleGpsBadgeClickAction(event) {
     if (event) event.stopPropagation();
-    
-    const deck = document.getElementById('mapLayerStyleDropdownDeck');
-    if (deck) deck.classList.add('hidden');
-
     startLiveHardwareGPSTracking();
-}
-
-function monitorNativeGpsPermissions() {
-    if (navigator.permissions && navigator.permissions.query) {
-        navigator.permissions.query({ name: 'geolocation' }).then(status => {
-            const checkState = () => {
-                if (status.state === 'denied') { 
-                    gpsStatusCachedBool = false; 
-                    updateGpsHudStatus('off', "GPS Off"); 
-                }
-            };
-            status.onchange = checkState; checkState();
-        });
-    }
 }
 
 function startLiveHardwareGPSTracking() {
@@ -319,20 +206,6 @@ function startLiveHardwareGPSTracking() {
                         radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2 
                     }).addTo(leafletMapInstance);
                 }
-                
-                const currentAccuracyRadiusMeters = pos.coords.accuracy || 0;
-                if (userAccuracyRadiusCircle) {
-                    userAccuracyRadiusCircle.setLatLng([userLat, userLon]).setRadius(currentAccuracyRadiusMeters);
-                } else {
-                    userAccuracyRadiusCircle = L.circle([userLat, userLon], {
-                        radius: currentAccuracyRadiusMeters,
-                        fillColor: '#3b82f6',
-                        fillOpacity: 0.12,
-                        stroke: false,
-                        pointerEvents: 'none'
-                    }).addTo(leafletMapInstance);
-                }
-                
                 leafletMapInstance.setView([userLat, userLon], 18);
             }
         },
@@ -349,13 +222,8 @@ function startLiveHardwareGPSTracking() {
 
 function triggerRecenterToGpsHardwareAction(event) {
     if(event) event.stopPropagation();
-    if(typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
     
-    const deck = document.getElementById('mapLayerStyleDropdownDeck');
-    if (deck) deck.classList.add('hidden');
-
     const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
-    
     if (compassBtn) {
         compassBtn.classList.add('scale-95', 'transition-transform', 'duration-100');
         setTimeout(() => { compassBtn.classList.remove('scale-95'); }, 120);
@@ -386,14 +254,7 @@ function triggerRecenterToGpsHardwareAction(event) {
 function executeSnappyRecenterViewportSequence() {
     if (!leafletMapInstance) return;
 
-    if (ENABLE_MAP_ROTATION) {
-        currentMapBearingAngle = 0;
-        const pane = document.querySelector('.leaflet-map-pane');
-        if (pane) pane.style.transform = 'rotate(0deg)';
-    }
-
     const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
-
     if (isCameraLocked && compassBtn) {
         compassBtn.classList.remove('thematic-pink-glow');
         void compassBtn.offsetWidth; 
@@ -413,7 +274,6 @@ function executeSnappyRecenterViewportSequence() {
 
     isCameraLocked = true;
     syncCameraLockVisualUIState();
-
     startLiveHardwareGPSTracking();
 }
 
@@ -430,151 +290,39 @@ function syncCameraLockVisualUIState() {
 
 function snapMapViewportToSelectedCityBounds(event) {
     if(event) event.stopPropagation();
-    if(typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
-    
-    const deck = document.getElementById('mapLayerStyleDropdownDeck');
-    if (deck) deck.classList.add('hidden');
-
     const magnifyingButton = document.getElementById('shortcutMagnifyingButton');
-
     if (!leafletMapInstance || travelSpots.length === 0) return;
     
     if (checkedCitiesStateArray.length === 0) {
-        if(magnifyingButton) {
-            magnifyingButton.classList.remove('thematic-pink-glow');
-            void magnifyingButton.offsetWidth; 
-            magnifyingButton.classList.add('thematic-pink-glow');
-        }
-        if(typeof triggerCuteSpeechBubbleHUD === 'function') triggerCuteSpeechBubbleHUD("Select a city filter first!", magnifyingButton, event);
+        if(magnifyingButton) magnifyingButton.classList.add('thematic-pink-glow');
         return;
     }
 
-    let activeCityPins = travelSpots.filter(spot => {
-        const latVal = spot.latitude ? String(spot.latitude).trim() : "";
-        return latVal !== "" && latVal !== "0" && checkedCitiesStateArray.includes(spot.city);
-    });
-
-    if (activeCityPins.length === 0) {
-        if(magnifyingButton) {
-            magnifyingButton.classList.remove('thematic-pink-glow');
-            void magnifyingButton.offsetWidth;
-            magnifyingButton.classList.add('thematic-pink-glow');
-        }
-        if(typeof triggerCuteSpeechBubbleHUD === 'function') triggerCuteSpeechBubbleHUD("No pins found for this city!", magnifyingButton, event);
-        return;
-    }
+    let activeCityPins = travelSpots.filter(spot => spot.latitude && checkedCitiesStateArray.includes(spot.city));
+    if (activeCityPins.length === 0) return;
 
     let targetBounds = L.latLngBounds();
-    activeCityPins.forEach(spot => {
-        targetBounds.extend([parseFloat(spot.latitude), parseFloat(spot.longitude)]);
-    });
+    activeCityPins.forEach(spot => targetBounds.extend([parseFloat(spot.latitude), parseFloat(spot.longitude)]));
 
-    const currentMapBounds = leafletMapInstance.getBounds();
-    const pinsAreAlreadyWhollyVisible = currentMapBounds.contains(targetBounds);
-
-    if (pinsAreAlreadyWhollyVisible) {
-        if (magnifyingButton) {
-            magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
-            void magnifyingButton.offsetWidth; 
-            magnifyingButton.classList.add('thematic-pink-glow');
-        }
-    } else {
-        if (magnifyingButton) {
-            magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
-            void magnifyingButton.offsetWidth; 
-            magnifyingButton.classList.add('lens-zoom-animation');
-        }
-
-        isCameraLocked = false;
-        syncCameraLockVisualUIState();
-
-        if (activeCityPins.length === 1) {
-            leafletMapInstance.setView([parseFloat(activeCityPins[0].latitude), parseFloat(activeCityPins[0].longitude)], 18, { animate: true });
-        } else {
-            leafletMapInstance.fitBounds(targetBounds, {
-                padding: [50, 50], 
-                animate: true,
-                duration: 0.6
-            });
-        }
-    }
+    isCameraLocked = false;
+    syncCameraLockVisualUIState();
+    leafletMapInstance.fitBounds(targetBounds, { padding: [50, 50], animate: true });
 }
 
 function plotDynamicMarkersOnCanvasMap() {
     if(!mapMarkersLayerGroup || !leafletMapInstance) return;
     mapMarkersLayerGroup.clearLayers();
-
     if(typeof getFilteredDatasetRows !== 'function') return;
+
     const dataset = getFilteredDatasetRows();
-    const currentZoom = leafletMapInstance.getZoom();
-    
-    let overlapPixelRadiusThreshold = 28;
-    if (currentZoom >= 14 && currentZoom <= 15) {
-        overlapPixelRadiusThreshold = 14; 
-    } else if (currentZoom >= 16) {
-        overlapPixelRadiusThreshold = 6; 
-    }
-    
-    let structuredClustersArray = [];
-
     dataset.forEach(spot => {
-        if(!spot.latitude || !spot.longitude || String(spot.latitude).trim() === "0" || String(spot.latitude).trim() === "") return;
+        if(!spot.latitude || !spot.longitude || String(spot.latitude).trim() === "0") return;
         
-        const latLngObj = L.latLng(parseFloat(spot.latitude), parseFloat(spot.longitude));
-        const screenPoint = leafletMapInstance.latLngToLayerPoint(latLngObj);
+        const isStarred = ['high', '🔥', 'must do', 'starred'].includes((spot.priority || "").toLowerCase());
+        const iconHTML = `<div class="custom-map-cube bg-slate-900 border-slate-700 ${isStarred ? '!border-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.7)]' : ''}"><i class="fa-solid fa-location-dot text-pink-500"></i></div>`;
+        const customMarkerIcon = L.divIcon({ html: iconHTML, className: '', iconSize: [36, 36], iconAnchor: [18, 18] });
         
-        let assignedToCluster = false;
-        
-        for (let i = 0; i < structuredClustersArray.length; i++) {
-            let cluster = structuredClustersArray[i];
-            const isCoordinatesExactMatch = (cluster.leadLatLng.lat === latLngObj.lat && cluster.leadLatLng.lng === latLngObj.lng);
-            
-            let dx = screenPoint.x - cluster.centerPx.x;
-            let dy = screenPoint.y - cluster.centerPx.y;
-            let pixelDistance = Math.sqrt(dx * dx + dy * dy);
-            
-            if (isCoordinatesExactMatch || (pixelDistance <= overlapPixelRadiusThreshold)) {
-                cluster.spots.push(spot);
-                assignedToCluster = true;
-                break;
-            }
-        }
-        
-        if (!assignedToCluster) {
-            structuredClustersArray.push({
-                centerPx: screenPoint,
-                leadLatLng: latLngObj,
-                spots: [spot]
-            });
-        }
-    });
-
-    structuredClustersArray.forEach(cluster => {
-        const clusterSize = cluster.spots.length;
-
-        if (clusterSize === 1) {
-            renderSingleMarkerElement(cluster.spots[0], 0, 0);
-        } else {
-            if (currentZoom >= 15) {
-                cluster.spots.forEach((spot, index) => {
-                    const angle = (index / clusterSize) * Math.PI * 2;
-                    const latOffset = Math.sin(angle) * 0.00018;
-                    const lonOffset = Math.cos(angle) * 0.00022;
-                    renderSingleMarkerElement(spot, latOffset, lonOffset);
-                });
-            } else {
-                const clusterHTML = `<div class="cluster-map-cube">${clusterSize}</div>`;
-                const clusterIcon = L.divIcon({ html: clusterHTML, className: '', iconSize: [40, 40], iconAnchor: [20, 20] });
-                const clusterMarker = L.marker([cluster.leadLatLng.lat, cluster.leadLatLng.lng], { icon: clusterIcon });
-                
-                clusterMarker.on('click', (e) => {
-                    L.DomEvent.stopPropagation(e);
-                    const maxZoomPossible = leafletMapInstance.getMaxZoom();
-                    const targetZoomLevel = Math.min(leafletMapInstance.getZoom() + 2, maxZoomPossible);
-                    leafletMapInstance.setView([cluster.leadLatLng.lat, cluster.leadLatLng.lng], targetZoomLevel, { animate: true });
-                });
-                mapMarkersLayerGroup.addLayer(clusterMarker);
-            }
-        }
+        const leafMarker = L.marker([parseFloat(spot.latitude), parseFloat(spot.longitude)], { icon: customMarkerIcon });
+        mapMarkersLayerGroup.addLayer(leafMarker);
     });
 }
