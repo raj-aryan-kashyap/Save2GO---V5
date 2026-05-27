@@ -298,14 +298,13 @@ function startLiveHardwareGPSTracking() {
         (pos) => {
             gpsStatusCachedBool = true;
             lastGpsSuccessTime = Date.now();
+            
+            // Core caching layout: Continuously write positional arrays into fast memory for an instant snappy feel
             cachedUserCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
             userLat = pos.coords.latitude; userLon = pos.coords.longitude;
             updateGpsHudStatus('active', "GPS Active");
 
-            isCameraLocked = true;
-            syncCameraLockVisualUIState();
-
-            if (leafletMapInstance) {
+            if (leafletMapInstance && isCameraLocked) {
                 if (userPositionPulseCircle) {
                     userPositionPulseCircle.setLatLng([userLat, userLon]);
                 } else {
@@ -327,7 +326,8 @@ function startLiveHardwareGPSTracking() {
                     }).addTo(leafletMapInstance);
                 }
                 
-                leafletMapInstance.setView([userLat, userLon], 18);
+                // Micro-adjustments handler loop: Quietly updates position if the coordinates shift slightly
+                leafletMapInstance.panTo([userLat, userLon], { animate: true });
             }
         },
         (err) => {
@@ -335,7 +335,6 @@ function startLiveHardwareGPSTracking() {
             isCameraLocked = false;
             syncCameraLockVisualUIState();
             updateGpsHudStatus('off', "GPS Off");
-            document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
             if (liveGpsWatchId !== null) {
                 navigator.geolocation.clearWatch(liveGpsWatchId);
                 liveGpsWatchId = null;
@@ -353,30 +352,74 @@ function triggerRecenterToGpsHardwareAction(event) {
     if (deck) deck.classList.add('hidden');
 
     const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
+    
+    // UI Experience Hack: Apply standard active scale animation on all touches for consistent haptic feedback
+    if (compassBtn) {
+        compassBtn.classList.add('scale-95', 'transition-transform', 'duration-100');
+        setTimeout(() => { compassBtn.classList.remove('scale-95'); }, 120);
+    }
 
-    // State A Check (GPS Dead/Off): Intercept hardware off states and open location instructions instantly
-    if (!gpsStatusCachedBool) {
-        isCameraLocked = false;
-        syncCameraLockVisualUIState();
-        document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
+    // High-Fidelity Sync Check: Silently ping the browser API to see if permissions have been toggled on since the last tap
+    if (!gpsStatusCachedBool && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                // If user enabled location service settings, mark active and run placement logic immediately
+                gpsStatusCachedBool = true;
+                cachedUserCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                userLat = pos.coords.latitude; userLon = pos.coords.longitude;
+                updateGpsHudStatus('active', "GPS Active");
+                executeSnappyRecenterViewportSequence();
+            },
+            (err) => {
+                // Keep throwing the error popup instructions if still disabled
+                gpsStatusCachedBool = false;
+                updateGpsHudStatus('off', "GPS Off");
+                document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
+            },
+            { timeout: 1500, maximumAge: 0 }
+        );
         return;
     }
 
-    // State B Check (Already Locked): Run high-fidelity pink gradient ambient pulse glow feedback sequence
+    executeSnappyRecenterViewportSequence();
+}
+
+// Snappy Rendering Loop: Instantly centers on runtime cache variables while checking coordinates quietly in the background
+function executeSnappyRecenterViewportSequence() {
+    if (!leafletMapInstance) return;
+
+    if (ENABLE_MAP_ROTATION) {
+        currentMapBearingAngle = 0;
+        const pane = document.querySelector('.leaflet-map-pane');
+        if (pane) pane.style.transform = 'rotate(0deg)';
+    }
+
+    const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
+
+    // UX Feedback Check: If camera is already centered and locked, pulse the pink ambient glow glow layer
     if (isCameraLocked && compassBtn) {
         compassBtn.classList.remove('thematic-pink-glow');
-        void compassBtn.offsetWidth; // Force DOM flow clear for seamless restart
+        void compassBtn.offsetWidth; 
         compassBtn.classList.add('thematic-pink-glow');
         return;
     }
 
-    // State C Check (Not Recentered): Trigger rotation transformation feedback loop and query live sensors
+    // Rotation Feedback loop: Spinner activates seamlessly when moving to a new target position
     const emojiSpinnerNode = document.getElementById('innerCompassEmojiSpinnerSpan');
     if (emojiSpinnerNode) {
         emojiSpinnerNode.style.transform = 'rotate(180deg) scale(0.85)';
         setTimeout(() => { emojiSpinnerNode.style.transform = 'rotate(0deg) scale(1)'; }, 350);
     }
 
+    // Snappy Viewport Placement: Snaps immediately to runtime data cache layers instead of waiting on cold sensor locks
+    if (cachedUserCoords) {
+        leafletMapInstance.setView([cachedUserCoords.lat, cachedUserCoords.lon], 18, { animate: false });
+    }
+
+    isCameraLocked = true;
+    syncCameraLockVisualUIState();
+
+    // Start background background sensor watch tasks safely
     startLiveHardwareGPSTracking();
 }
 
