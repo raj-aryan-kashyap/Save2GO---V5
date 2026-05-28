@@ -171,7 +171,12 @@ function initLeafletMapEngineCanvas() {
         mapTileCleanupTimerId = setTimeout(() => {
             if (activeBaseTileLayer?._pruneTiles) activeBaseTileLayer._pruneTiles();
         }, 10000);
+
     });
+
+    // Initial weather fetch — resolves GPS / localStorage / fallback
+    // Width sync runs slightly after so the style button has fully rendered
+    setTimeout(() => { _syncWeatherWidgetWidth(); refreshMapWeatherWidget(); }, 600);
 
     // ── Calibration canvas dismiss ────────────────────────────────────────────
     // Waits for the tile layer's load event (all current-viewport tiles ready),
@@ -252,10 +257,13 @@ function setMapBaseLayerProviderSource(styleKey) {
 
     const deck = document.getElementById('mapLayerStyleDropdownDeck');
     if(deck) deck.classList.add('hidden');
-    
+
     if (mapMarkersLayerGroup && travelSpots.length > 0) {
         plotDynamicMarkersOnCanvasMap();
     }
+
+    // Re-sync weather widget width in case new label changed button width
+    requestAnimationFrame(_syncWeatherWidgetWidth);
 }
 
 function updateGpsHudStatus(statusKey, labelText) {
@@ -333,6 +341,15 @@ function startLiveHardwareGPSTracking() {
             localStorage.setItem('compass_user_live_lat', userLat);
             localStorage.setItem('compass_user_live_lng', userLon);
             localStorage.setItem('compass_user_live_ts',  Date.now());
+
+            // Check whether the user has moved near spots hidden by active filters
+            if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
+
+            // Update the proximity ripple on the user dot (100 m threshold)
+            updateProximityRippleState();
+
+            // Refresh map weather widget — internally throttled to ≤1 call / 15 min
+            refreshMapWeatherWidget();
 
             updateGpsHudStatus('active', "GPS Active");
             // NOTE: do NOT forcefully set isCameraLocked = true here.
@@ -828,7 +845,17 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
     
     titleWidget.innerText = spotObj.spot_name || "Unnamed Destination";
     notesWidget.innerText = spotObj.notes || "No custom notes assigned.";
-    document.getElementById('trayCityBadge').innerText = `${spotObj.city || 'Global'} • ${spotObj.category || 'General'}`;
+    // Badge: [icon] category • city  — uses the same icon helper as list cards and drawer rows
+    const trayBadgeCatIcon = (typeof getCategoryIconClass === 'function')
+        ? getCategoryIconClass(spotObj.category)
+        : 'fa-location-dot text-slate-400';
+    const trayBadgeCat  = spotObj.category || 'General';
+    const trayBadgeCity = spotObj.city     || 'Global';
+    document.getElementById('trayCityBadge').innerHTML =
+        `<i class="fa-solid ${trayBadgeCatIcon} text-[8px] shrink-0"></i>` +
+        `<span class="uppercase tracking-wider">${trayBadgeCat}</span>` +
+        `<span class="text-slate-700 font-normal">•</span>` +
+        `<span class="uppercase tracking-wider text-slate-500">${trayBadgeCity}</span>`;
 
     if (isDone) {
         titleWidget.className = "text-base font-black text-slate-500 line-through mt-2 truncate max-w-[220px]";
@@ -845,6 +872,31 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
         distHUD.className = "text-xs font-mono font-bold bg-amber-500/10 text-amber-400 px-2 py-1 rounded-lg border border-amber-500/20 shrink-0 h-fit";
     } else {
         distHUD.className = "text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400";
+    }
+
+    // ── Weather badge ─────────────────────────────────────────────────────────
+    const trayWeatherBadge = document.getElementById('trayWeatherBadge');
+    if (trayWeatherBadge) {
+        const wLat = spotObj.latitude  ? String(spotObj.latitude).trim()  : '';
+        const wLng = spotObj.longitude ? String(spotObj.longitude).trim() : '';
+        const trayHasCoords = wLat !== '' && wLat !== '0' && wLng !== '' && wLng !== '0';
+        if (!trayHasCoords) {
+            // No coordinates — show disabled (cloud + slash)
+            trayWeatherBadge.className = 'inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-slate-900/50 text-slate-600';
+            trayWeatherBadge.innerHTML = '<i class="fa-solid fa-cloud text-[10px]" style="opacity:0.35"></i><i class="fa-solid fa-slash text-[7px]" style="margin-left:-0.55em;opacity:0.35"></i>';
+        } else {
+            // Has coordinates — show loading placeholder, then update async
+            trayWeatherBadge.className = 'inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-sky-500/10 text-sky-300';
+            trayWeatherBadge.innerHTML = '<i class="fa-solid fa-cloud text-[10px] opacity-40"></i>';
+            if (typeof fetchWeatherForCoords === 'function') {
+                fetchWeatherForCoords(parseFloat(wLat), parseFloat(wLng)).then(w => {
+                    const badge = document.getElementById('trayWeatherBadge');
+                    if (w && badge) {
+                        badge.innerHTML = `<i class="fa-solid ${w.iconClass} text-[10px]"></i><span>${w.temp}°</span>`;
+                    }
+                });
+            }
+        }
     }
 
     document.getElementById('trayOpenReferenceBtn').href = spotObj.instagram_url || "#";
@@ -876,19 +928,44 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
     const starredBadge = document.getElementById('trayStarredBadge');
     if (isStarredBool) starredBadge.classList.remove('hidden'); else starredBadge.classList.add('hidden');
 
+    // Apply / remove golden glow on both tray faces to match the list card treatment
+    const trayFaces = document.querySelectorAll('#mapDetailTrayHUD .flip-card-front-face, #mapDetailTrayHUD .flip-card-back-face');
+    trayFaces.forEach(face => {
+        if (isStarredBool) face.classList.add('starred-gold-glow');
+        else face.classList.remove('starred-gold-glow');
+    });
+
     const doneBtn = document.getElementById('trayDoneToggleBtn');
     const starBtn = document.getElementById('trayStarToggleBtn');
 
     doneBtn.innerHTML = isDone ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo' : '<i class="fa-solid fa-check mr-1"></i> Mark Done';
     doneBtn.onclick = function() {
-        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'update_status', isDone ? 'Pending' : 'Done', spotObj.spot_name);
+        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'update_status', isDone ? 'Pending' : 'Done');
         dismissMapDetailTrayHUDCard();
     };
 
     starBtn.innerHTML = isStarredBool ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star';
     starBtn.onclick = function() {
-        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'toggle_priority', isStarredBool ? 'Normal' : 'Starred', spotObj.spot_name);
-        dismissMapDetailTrayHUDCard();
+        // Toggle priority in-memory and persist to cloud — tray stays open
+        const newPriority = isStarredBool ? 'Normal' : 'Starred';
+        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'toggle_priority', newPriority);
+
+        // Flip the local starred state and refresh all tray elements in-place
+        const nowStarred = !isStarredBool;
+        isStarredBool = nowStarred;   // update the closure variable so repeated taps stay correct
+
+        // Badge
+        if (nowStarred) starredBadge.classList.remove('hidden');
+        else starredBadge.classList.add('hidden');
+
+        // Golden glow on both faces
+        trayFaces.forEach(face => {
+            if (nowStarred) face.classList.add('starred-gold-glow');
+            else face.classList.remove('starred-gold-glow');
+        });
+
+        // Button label
+        starBtn.innerHTML = nowStarred ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star';
     };
 
     const backDesc = document.getElementById('trayBackLongDescription');
@@ -937,5 +1014,197 @@ function dismissMapDetailTrayHUDCard() {
     if (sharedBg) sharedBg.classList.add('hidden');
     const plusBtn = document.getElementById('globalFloatingActionPlusButton');
     if (plusBtn) plusBtn.classList.remove('hidden');
+}
+
+// ── Proximity Ripple ─────────────────────────────────────────────────────────
+// Pink ring halos on the user's GPS dot when within 100 m of any saved spot.
+// Called from the watchPosition callback every time the GPS position updates.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function updateProximityRippleState() {
+    if (!gpsStatusCachedBool ||
+        typeof userLat === 'undefined' || typeof userLon === 'undefined' ||
+        typeof travelSpots === 'undefined' || !leafletMapInstance) {
+        if (proximityRippleActive) {
+            proximityRippleActive = false;
+            removeProximityRippleMarker();
+        }
+        return;
+    }
+
+    const isNearNow = travelSpots.some(spot => {
+        const lat = parseFloat(spot.latitude);
+        const lon = parseFloat(spot.longitude);
+        if (!lat || !lon) return false;
+        return typeof calculateDistance === 'function' &&
+               calculateDistance(userLat, userLon, lat, lon) <= 0.1; // 100 m
+    });
+
+    if (isNearNow && !proximityRippleActive) {
+        // Just entered the 100 m proximity zone
+        proximityRippleActive = true;
+        placeProximityRippleMarker();
+    } else if (!isNearNow && proximityRippleActive) {
+        // Just left the 100 m proximity zone
+        proximityRippleActive = false;
+        removeProximityRippleMarker();
+    } else if (isNearNow && proximityRippleMarker) {
+        // Still nearby — keep the marker centred on the current position
+        proximityRippleMarker.setLatLng([userLat, userLon]);
+    }
+}
+
+function placeProximityRippleMarker() {
+    const rippleIcon = L.divIcon({
+        html: `<div class="proximity-ripple-container">
+                   <div class="proximity-ripple-ring r1"></div>
+                   <div class="proximity-ripple-ring r2"></div>
+                   <div class="proximity-ripple-ring r3"></div>
+               </div>`,
+        className:  '',
+        iconSize:   [100, 100],
+        iconAnchor: [50, 50]   // centre of the 100×100 container sits on the LatLng
+    });
+
+    if (proximityRippleMarker) {
+        // Reuse existing marker — just move it and refresh the icon
+        proximityRippleMarker.setLatLng([userLat, userLon]);
+        proximityRippleMarker.setIcon(rippleIcon);
+    } else {
+        proximityRippleMarker = L.marker([userLat, userLon], {
+            icon:         rippleIcon,
+            zIndexOffset: -1000,   // render behind map pins and the blue user dot
+            interactive:  false
+        }).addTo(leafletMapInstance);
+    }
+}
+
+function removeProximityRippleMarker() {
+    if (proximityRippleMarker && leafletMapInstance) {
+        leafletMapInstance.removeLayer(proximityRippleMarker);
+        proximityRippleMarker = null;
+    }
+}
+
+// ── Weather widget width sync ────────────────────────────────────────────────
+// Measures the rendered width of the Style Drawer toggle button and applies
+// the same width to the weather widget so both components are visually aligned.
+// Called after map init, after every style change, and after weather data loads.
+function _syncWeatherWidgetWidth() {
+    const widget = document.getElementById('mapWeatherWidget');
+    if (!widget) return;
+    // The style button is a sibling inside the same flex-col items-end container
+    const container = widget.parentElement;
+    if (!container) return;
+    const styleBtn = container.querySelector('button[onclick*="mapLayerStyleDropdownDeck"]');
+    if (!styleBtn) return;
+    const bw = styleBtn.getBoundingClientRect().width;
+    if (bw > 0) widget.style.width = Math.round(bw) + 'px';
+}
+
+// ── Map Weather Widget ───────────────────────────────────────────────────────
+//
+// Quota strategy (OWM free tier = 1,000 calls / day):
+//   • Hard throttle: one real API call per 15 minutes at most  → ≤ 96 calls/day
+//   • The shared weatherCache adds a 30-min layer on top, so cache hits cost 0
+//   • GPS fires every few seconds but almost always hits the cache
+//
+// Coordinate resolution priority:
+//   1. Live GPS   (gpsStatusCachedBool + userLat/userLon)
+//   2. localStorage cache  (compass_user_live_lat / _lng written by watchPosition)
+//   3. No data → animated three-icon fallback
+
+const MAP_WEATHER_USER_MIN_INTERVAL = 15 * 60 * 1000; // 15 min between real API calls
+let   _mapWeatherLastFetchTime  = 0;
+let   _mapWeatherFallbackActive = false; // true while the animated fallback is showing
+
+// ── DOM helpers ───────────────────────────────────────────────────────────────
+
+function _setMapWeatherWidgetContent(html) {
+    const w = document.getElementById('mapWeatherWidget');
+    if (w) w.innerHTML = html;
+}
+
+// Shows the animated three-icon state when no location data is available.
+// Icons are spread evenly across the full w-full widget width.
+function _showMapWeatherAnimatedFallback() {
+    if (_mapWeatherFallbackActive) return; // already showing
+    _mapWeatherFallbackActive = true;
+    _setMapWeatherWidgetContent(
+        `<div class="flex items-center justify-around w-full">` +
+            `<i class="fa-solid fa-sun        text-yellow-400 text-[12px] weather-wave-icon wave-1"></i>` +
+            `<i class="fa-solid fa-cloud      text-slate-400  text-[12px] weather-wave-icon wave-2"></i>` +
+            `<i class="fa-solid fa-cloud-rain text-blue-400   text-[12px] weather-wave-icon wave-3"></i>` +
+        `</div>`
+    );
+}
+
+// Renders real weather data: icon · temp · divider · scrolling feels-like ticker
+function _applyMapWeatherData(w) {
+    _mapWeatherFallbackActive = false;
+    _setMapWeatherWidgetContent(
+        `<i class="fa-solid ${w.iconClass} text-[12px] shrink-0"></i>` +
+        `<span class="text-[10px] font-black uppercase tracking-wider text-slate-300 shrink-0 leading-none">${w.temp}°C</span>` +
+        `<div class="w-px h-3 bg-slate-700 shrink-0"></div>` +
+        `<div class="flex-1 overflow-hidden relative" style="height:1.1em">` +
+            `<span class="absolute whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-slate-500 weather-ticker-anim" style="top:0;left:105%">` +
+                `Feels like ${w.feelsLike ?? w.temp}°` +
+            `</span>` +
+        `</div>`
+    );
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
+// Called on:  map init · every GPS watchPosition success · map tab switch
+function refreshMapWeatherWidget() {
+    // Ensure width is synced first (no-op if already set)
+    requestAnimationFrame(_syncWeatherWidgetWidth);
+    if (typeof fetchWeatherForCoords !== 'function') return;
+
+    // ── Step 1: resolve coordinates ──────────────────────────────────────────
+    let lat = null, lon = null;
+
+    if (typeof gpsStatusCachedBool !== 'undefined' && gpsStatusCachedBool &&
+        typeof userLat !== 'undefined' && userLat) {
+        // Live GPS available
+        lat = userLat; lon = userLon;
+    } else {
+        // Fall back to last-known coords written by watchPosition
+        const cLat = localStorage.getItem('compass_user_live_lat');
+        const cLon = localStorage.getItem('compass_user_live_lng');
+        if (cLat && cLon && parseFloat(cLat) !== 0) {
+            lat = parseFloat(cLat); lon = parseFloat(cLon);
+        }
+    }
+
+    // ── Step 2: no coords at all → animated fallback ─────────────────────────
+    if (lat === null || lon === null) {
+        _showMapWeatherAnimatedFallback();
+        return;
+    }
+
+    // ── Step 3: check weatherCache before hitting the network ─────────────────
+    const key = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+    if (typeof weatherCache !== 'undefined' && typeof WEATHER_CACHE_TTL !== 'undefined') {
+        const hit = weatherCache.get(key);
+        if (hit && (Date.now() - hit.fetchedAt) < WEATHER_CACHE_TTL) {
+            _applyMapWeatherData(hit); // instant — no network call
+            return;
+        }
+    }
+
+    // ── Step 4: throttle guard (15-min minimum between real API calls) ────────
+    // Exception: if the fallback was active, fetch immediately so real data
+    // replaces the animated placeholder the moment GPS comes back online.
+    const now = Date.now();
+    if (!_mapWeatherFallbackActive && (now - _mapWeatherLastFetchTime) < MAP_WEATHER_USER_MIN_INTERVAL) {
+        return; // too soon — skip without showing fallback
+    }
+
+    // ── Step 5: fire the API call ─────────────────────────────────────────────
+    _mapWeatherLastFetchTime = now;
+    fetchWeatherForCoords(lat, lon).then(w => {
+        if (w) _applyMapWeatherData(w);
+    });
 }
 

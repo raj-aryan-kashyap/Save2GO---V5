@@ -181,6 +181,16 @@
                         <span class="text-[8px] font-bold tracking-tight text-slate-400">Sat</span>
                     </button>
                 </div>
+
+                <!-- ── Map Weather Widget ──────────────────────────────────────────── -->
+                <div id="mapWeatherWidget" class="bg-slate-900/95 border border-slate-800 rounded-xl shadow-2xl px-3 py-2 pointer-events-auto flex items-center gap-2">
+                    <i id="mapWeatherIcon" class="fa-solid fa-cloud text-[12px] shrink-0 text-sky-400 opacity-40"></i>
+                    <span id="mapWeatherTemp" class="text-[10px] font-black uppercase tracking-wider text-slate-300 shrink-0 leading-none">—°C</span>
+                    <div class="w-px h-3 bg-slate-700 shrink-0"></div>
+                    <div class="flex-1 overflow-hidden relative" style="height:1.1em">
+                        <span id="mapWeatherTicker" class="absolute whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-slate-500 weather-ticker-anim" style="top:0;left:105%">Feels like —°</span>
+                    </div>
+                </div>
             </div>
 
             <div id="mapNavigationShortcutsStack" class="absolute top-1/2 right-4 -translate-y-1/2 z-[400] flex flex-col gap-2.5 pointer-events-auto">
@@ -191,13 +201,52 @@
                     <i id="innerCompassEmojiSpinnerSpan" class="fa-solid fa-compass inline-block transform transition-transform duration-300 ease-out"></i>
                 </button>
             </div>
-            
+
+            <!-- ── Hidden Pins Alert Banner ──────────────────────────────────────── -->
+            <!-- Slides down from just below the top HUD when nearby spots are hidden by an active type filter. -->
+            <div id="hiddenPinsAlertBanner" class="hidden absolute left-3 right-3 z-[450] pointer-events-auto" style="top: 112px;">
+                <!-- Outer shell: fully-opaque slate-900 card, matching the map tray and list cards -->
+                <div class="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden" style="box-shadow: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(236,72,153,0.12);">
+                    <!-- Pink-to-purple gradient accent bar at the top, like the app's gradient buttons -->
+                    <div class="h-[3px] w-full bg-gradient-to-r from-pink-500 to-purple-600"></div>
+                    <div class="px-4 pt-3 pb-3.5 flex flex-col gap-3">
+                        <!-- Header row: icon + text -->
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 rounded-xl bg-pink-500/10 border border-pink-500/20 flex items-center justify-center shrink-0">
+                                <i class="fa-solid fa-map-pin text-pink-400 text-[12px]"></i>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <p class="text-[12px] font-black text-slate-200 tracking-wide leading-tight">Nearby Spots Hidden</p>
+                                <p id="hiddenPinsAlertBannerSubtitle" class="text-[10px] text-slate-400 leading-snug mt-0.5">You're near saved spots, but they're hidden by the active type filter.</p>
+                            </div>
+                        </div>
+                        <!-- Action buttons -->
+                        <div class="flex gap-2">
+                            <button onclick="unhideHiddenPinsBannerAction()" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-white text-[11px] font-black tracking-wide rounded-xl py-2.5 active:opacity-80 transition-opacity shadow-lg">
+                                <i class="fa-solid fa-eye mr-1.5"></i>Unhide Pins
+                            </button>
+                            <button onclick="dismissHiddenPinsBannerToMiniBubble()" class="flex-1 bg-slate-950 text-slate-400 text-[11px] font-black tracking-wide rounded-xl py-2.5 active:bg-slate-800 border border-slate-800 transition-colors">
+                                Dismiss
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Hidden Pins Mini Bubble ───────────────────────────────────────── -->
+            <!-- Appears after the banner is dismissed. Tap to reopen the banner. -->
+            <div id="hiddenPinsMiniBubble" class="hidden absolute left-3 z-[450] pointer-events-auto" style="top: 148px;">
+                <button onclick="reopenHiddenPinsBanner()" class="w-9 h-9 bg-red-600 border border-red-400/30 rounded-full shadow-xl shadow-red-900/40 flex items-center justify-center active:bg-red-700 active:scale-90 transition-all">
+                    <i id="hiddenPinsMiniBubbleIcon" class="fa-solid fa-exclamation text-white text-[13px] font-black"></i>
+                </button>
+            </div>
+
         </div>
 
         <div id="view-list" class="view-panel w-full bg-slate-950 flex flex-col overflow-hidden">
             
             <div class="w-full px-4 bg-slate-950 shrink-0 z-20 relative">
-                <div class="max-w-md mx-auto bg-slate-900/90 backdrop-blur-xl border-x border-b border-slate-800/80 px-3.5 py-1 rounded-b-xl flex justify-between items-center h-7 shadow-md -mt-[1px]">
+                <div class="w-fit mx-auto bg-slate-900/90 backdrop-blur-xl border-x border-b border-slate-800/80 px-4 py-2.5 rounded-b-xl flex justify-center items-center gap-3 shadow-md -mt-[1px]">
                     <span class="text-[9px] uppercase font-black tracking-widest text-slate-400">Summary</span>
                     <span id="vaultDensityHUDLabelCounter" class="text-[10px] font-mono font-bold px-2 py-0.5 bg-pink-500/10 text-pink-400 border border-pink-500/20 rounded-md">Showing 0 / 0 Spots</span>
                 </div>
@@ -272,13 +321,14 @@
                 <div class="flex justify-between items-start gap-2 shrink-0">
                     <div>
                         <div class="flex items-center gap-1.5 flex-wrap">
-                            <span id="trayCityBadge" class="text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
+                            <span id="trayCityBadge" class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
                             <span id="trayStarredBadge" class="hidden text-[9px] font-black text-amber-400"><i class="fa-solid fa-star mr-1"></i>Starred</span>
                             <span id="trayBookedBadge" class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
                         </div>
                         <h3 id="traySpotTitle" class="text-base font-black text-slate-200 mt-2 truncate max-w-[220px]">Spot Name</h3>
                     </div>
                     <div class="flex items-center gap-1.5 shrink-0">
+                        <span id="trayWeatherBadge" class="inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-sky-500/10 text-sky-300"><i class="fa-solid fa-cloud opacity-40"></i></span>
                         <span id="trayDistanceBadge" class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400">0m</span>
                         <button onclick="dismissMapDetailTrayHUDCard()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
                     </div>
@@ -317,13 +367,6 @@
                 </div>
                 <div class="flex-1 overflow-y-auto subtle-scrollbar space-y-4 pt-3 pr-0.5">
                     <p id="trayBackLongDescription" class="text-xs text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-100/10 leading-relaxed font-medium">Loading descriptive logs...</p>
-                    <div class="space-y-1.5">
-                        <span class="text-[9px] font-black tracking-widest text-pink-500 block">Itinerary Mapping Tracker</span>
-                        <div id="trayInlineItineraryAssignorRow" class="bg-slate-950 border border-slate-850 p-2 rounded-xl flex items-center justify-between gap-2 text-[10px]">
-                            <span class="font-bold text-slate-400 uppercase tracking-wider">Map to Schedule:</span>
-                            <div class="flex gap-1" id="trayItineraryBtnDeck"></div>
-                        </div>
-                    </div>
                     <div class="space-y-1.5">
                         <span class="text-[9px] font-black tracking-widest text-slate-500 block">Schedule</span>
                         <div id="trayBackHoursGrid" class="bg-slate-955/50 border border-slate-100/10 p-2.5 rounded-xl grid grid-cols-1 gap-1 font-mono text-[11px] text-slate-400"></div>
@@ -706,6 +749,49 @@
                 <button onclick="closeInlineUnscheduledSpotDrawer()" class="w-7 h-7 bg-slate-800 rounded-full flex items-center justify-center text-slate-400 text-xs font-bold active:bg-slate-700 transition-colors shrink-0"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div id="unscheduledSpotsContainer" class="flex-1 overflow-y-auto pr-1 flex flex-col"></div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         Hidden Pins Drawer  (z-460 — above banner, below nav 490 & tray 488+)
+         Left-side slide-in panel listing all spots hidden by the active type
+         filter. Opens when the user taps the mini red exclamation bubble.
+    ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="hiddenPinsDrawerOverlay"
+         class="fixed inset-0 bg-slate-950/65 backdrop-blur-sm z-[460] hidden flex justify-start"
+         onclick="if(event.target===this) closeHiddenPinsDrawer()">
+
+        <div id="hiddenPinsDrawerPanel"
+             class="w-[280px] bg-slate-900 flex flex-col shadow-2xl overflow-hidden border-r border-slate-800"
+             style="padding-bottom: 80px;"><!-- 80 px clears the 76 px nav bar -->
+
+            <!-- Pink accent stripe -->
+            <div class="h-[3px] w-full bg-gradient-to-r from-pink-500 to-purple-600 shrink-0"></div>
+
+            <!-- Header -->
+            <div class="flex items-center justify-between px-4 py-3.5 border-b border-slate-800 shrink-0">
+                <div>
+                    <p class="text-[12px] font-black text-slate-200 tracking-wide">Hidden Spots</p>
+                    <p id="hiddenPinsDrawerCount" class="text-[10px] text-slate-500 mt-0.5">–</p>
+                </div>
+                <button onclick="closeHiddenPinsDrawer()"
+                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- Scrollable spot list -->
+            <div id="hiddenPinsDrawerBody"
+                 class="flex-1 overflow-y-auto subtle-scrollbar px-3 py-3 space-y-4">
+            </div>
+
+            <!-- Unhide All footer (rendered above nav bar via padding-bottom on panel) -->
+            <div class="shrink-0 px-3 pt-2 pb-3 border-t border-slate-800">
+                <button onclick="unhideAllAndCloseDrawer()"
+                        class="w-full bg-gradient-to-r from-pink-600 to-purple-600 text-white text-[12px] font-black tracking-wide rounded-xl py-3 active:opacity-80 transition-opacity shadow-lg shadow-pink-500/20">
+                    <i class="fa-solid fa-eye mr-2"></i>Unhide All
+                </button>
+            </div>
         </div>
     </div>
 

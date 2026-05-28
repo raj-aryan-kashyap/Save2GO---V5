@@ -19,6 +19,11 @@
     /* Prevent rubber-band overscroll from pushing the scrollbar thumb
        below the container's bottom edge and behind the nav bar. */
     overscroll-behavior-y: contain;
+    /* Soft top fade — cards dissolve into the Summary bar instead of
+       hard-clipping against it. Transparent for the first 20 px, then
+       fully opaque by 36 px so normal card content is never dimmed. */
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 36px);
+    mask-image:         linear-gradient(to bottom, transparent 0px, black 36px);
 }
 
 /* Inset the scrollbar track so the thumb never touches the nav bar edge.
@@ -244,4 +249,168 @@ body {
 .bubble-popup-anim > div {
     transform-origin: center bottom;
     animation: bubblePopIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* ── Hidden Pins Alert Banner ───────────────────────────────────────────────
+   Slides down from above the visible map area (translateY(-110%)) into its
+   resting position with a spring overshoot. Exit reverses upward quickly.
+────────────────────────────────────────────────────────────────────────── */
+@keyframes hiddenPinsBannerSlideIn {
+    0%   { opacity: 0; transform: translateY(-110%) scale(0.96); }
+    55%  { opacity: 1; transform: translateY(4px)   scale(1.01); }
+    100% { opacity: 1; transform: translateY(0)     scale(1);    }
+}
+
+@keyframes hiddenPinsBannerSlideOut {
+    0%   { opacity: 1; transform: translateY(0)     scale(1);    }
+    100% { opacity: 0; transform: translateY(-110%) scale(0.96); }
+}
+
+.hidden-pins-banner-enter {
+    animation: hiddenPinsBannerSlideIn 0.42s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.hidden-pins-banner-exit {
+    animation: hiddenPinsBannerSlideOut 0.26s ease-in forwards;
+}
+
+/* ── Hidden Pins Mini Bubble Attention Wiggle ───────────────────────────────
+   The exclamation icon pops up with a bouncy scale then shakes left-right
+   before settling back to rest. Applied periodically via JS.
+────────────────────────────────────────────────────────────────────────── */
+@keyframes bubbleAttentionWiggle {
+    0%   { transform: scale(1)    rotate(0deg);  }
+    16%  { transform: scale(1.4)  rotate(-10deg); }
+    32%  { transform: scale(1.35) rotate(10deg);  }
+    48%  { transform: scale(1.2)  rotate(-7deg);  }
+    64%  { transform: scale(1.1)  rotate(5deg);   }
+    80%  { transform: scale(1.04) rotate(-2deg);  }
+    100% { transform: scale(1)    rotate(0deg);   }
+}
+
+.hidden-pins-bubble-attention {
+    animation: bubbleAttentionWiggle 0.72s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* ── Starred Item Golden Glow ───────────────────────────────────────────────
+   Applied to both card faces (list view) and the map detail tray faces when
+   the spot's priority is Starred. Transitions in/out smoothly so that
+   real-time star/unstar toggles feel responsive rather than snappy.
+────────────────────────────────────────────────────────────────────────── */
+.starred-gold-glow {
+    border-color: rgba(234, 179, 8, 0.40) !important;
+    box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.12),
+                0 0 18px rgba(234, 179, 8, 0.10),
+                0 4px 24px rgba(0, 0, 0, 0.55);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* Non-starred cards get a smooth transition so the glow fades out gracefully */
+.flip-card-front-face,
+.flip-card-back-face {
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* ── Hidden Pins Drawer ─────────────────────────────────────────────────────
+   The panel slides in from the left edge. A spring-based cubic-bezier gives a
+   satisfying snap on entry; exit is a quick linear pull-away.
+────────────────────────────────────────────────────────────────────────── */
+@keyframes hiddenPinsDrawerSlideIn {
+    0%   { transform: translateX(-100%); }
+    65%  { transform: translateX(4px);   }
+    100% { transform: translateX(0);     }
+}
+
+@keyframes hiddenPinsDrawerSlideOut {
+    0%   { transform: translateX(0);     }
+    100% { transform: translateX(-100%); }
+}
+
+.hidden-pins-drawer-enter {
+    animation: hiddenPinsDrawerSlideIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.hidden-pins-drawer-exit {
+    animation: hiddenPinsDrawerSlideOut 0.22s ease-in forwards;
+}
+
+/* ── Proximity Ripple ───────────────────────────────────────────────────────
+   Three pink ring halos that expand outward from the user's GPS dot whenever
+   they are within 100 m of any saved spot.
+
+   Each ring uses a border-only circle (transparent fill) so the blue dot
+   beneath stays fully visible at all times.
+
+   Cycle: the active ripple plays over the first 2 s of a 10 s period, then
+   stays invisible for the remaining 8 s before repeating.
+   Three rings are staggered by 0.4 s each to create a cascading wave effect.
+────────────────────────────────────────────────────────────────────────── */
+.proximity-ripple-container {
+    position: relative;
+    width: 100px;
+    height: 100px;
+    pointer-events: none;
+}
+
+.proximity-ripple-ring {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px solid rgba(236, 72, 153, 0.55);   /* pink-500 at 55% */
+    background: transparent;
+    transform: scale(0.16);   /* 16 px — matches the 8px-radius blue dot */
+    opacity: 0;
+    pointer-events: none;
+    animation: proximityRipplePulse 10s ease-out infinite;
+}
+
+/* Stagger: ring 2 fires 0.4 s after ring 1, ring 3 fires 0.4 s after ring 2.
+   The positive delay is preserved across every cycle so the wave stays
+   coherent indefinitely. */
+.proximity-ripple-ring.r2 { animation-delay: 0.4s; }
+.proximity-ripple-ring.r3 { animation-delay: 0.8s; }
+
+@keyframes proximityRipplePulse {
+    /*  0 %  → 0.0 s : ring appears at dot size, full brightness */
+    0%   { transform: scale(0.16); opacity: 0.6;  }
+    /* 20 %  → 2.0 s : ring reaches full size, fully faded out   */
+    20%  { transform: scale(1);    opacity: 0;    }
+    /* 21 %  → 2.1 s : instantly snap back to start size (invisible) */
+    21%  { transform: scale(0.16); opacity: 0;    }
+    /* 100 % → 10.0 s: hold invisible; next iteration begins      */
+    100% { transform: scale(0.16); opacity: 0;    }
+}
+
+/* ── Map Weather Widget — No-GPS animated fallback ──────────────────────────
+   Three icons (sun / cloud / rain) pulse in a rolling wave while GPS data is
+   unavailable. Each icon animates over a 3 s period; the 1 s stagger per icon
+   creates a smooth left-to-right wave effect. When GPS becomes available the
+   fallback is replaced with real weather data. */
+@keyframes weatherWavePulse {
+    0%, 100% { transform: scale(1);    opacity: 0.35; }
+    25%       { transform: scale(1.40); opacity: 1;    }
+    50%       { transform: scale(1);    opacity: 0.35; }
+}
+
+.weather-wave-icon {
+    animation: weatherWavePulse 3s ease-in-out infinite;
+    transform-origin: center;
+}
+.weather-wave-icon.wave-1 { animation-delay: 0s; }
+.weather-wave-icon.wave-2 { animation-delay: 1s; }
+.weather-wave-icon.wave-3 { animation-delay: 2s; }
+
+/* ── Map Weather Widget — "Feels Like" bus-ticker scroll ────────────────────
+   The span starts just beyond the right edge of its overflow-hidden container
+   (left: 105% of parent width) and exits off the left (left: -105%).
+   Using left% (parent-relative) gives correct clipping at any text width.
+   8 s duration keeps the scroll slow and readable. */
+@keyframes weatherTickerScroll {
+    0%   { left:  105%; }
+    100% { left: -105%; }
+}
+.weather-ticker-anim {
+    animation: weatherTickerScroll 8s linear infinite;
 }

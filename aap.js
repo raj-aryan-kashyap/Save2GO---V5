@@ -1,6 +1,11 @@
 const APP_VERSION = "v5.0.10";
-const API_URL = "https://script.google.com/macros/s/AKfycbyYTU_I0zel50EKpB767LmQ2NjeKudS93yv8-DYSYnBxaFS5_I1TWily79rOkMdGTu5IA/exec"; 
+const API_URL = "https://script.google.com/macros/s/AKfycbyYTU_I0zel50EKpB767LmQ2NjeKudS93yv8-DYSYnBxaFS5_I1TWily79rOkMdGTu5IA/exec";
 const BACKEND_URL = API_URL;
+
+// ── OpenWeatherMap ───────────────────────────────────────────────────────────
+const OWM_API_KEY         = '49a30e093edf979096a108d11417df90';
+const weatherCache        = new Map(); // key: "lat,lon" → { iconClass, temp, fetchedAt }
+const WEATHER_CACHE_TTL   = 30 * 60 * 1000; // 30 minutes
 
 // --- GLOBAL SHARED APPLICATION ENGINE MEMORY STATE ---
 let currentUser = localStorage.getItem('compass_user');
@@ -34,11 +39,13 @@ let currentMapBearingAngle = 0;
 let mapTileCleanupTimerId = null;
 let hasInitialGpsLockRendered = false;
 
-let leafletMapInstance = null; 
-let mapMarkersLayerGroup = null; 
-let userPositionPulseCircle = null; 
+let leafletMapInstance = null;
+let mapMarkersLayerGroup = null;
+let userPositionPulseCircle = null;
 let userAccuracyRadiusCircle = null;
-let activeBaseTileLayer = null; 
+let activeBaseTileLayer = null;
+let proximityRippleMarker  = null;  // divIcon marker that hosts the pink ring animation
+let proximityRippleActive  = false; // whether the user is currently within 100 m of a spot
 
 let startY = 0; 
 let isPulling = false;
@@ -403,13 +410,18 @@ async function syncData(isManualForce) {
     }
 }
 
-async function updateCloudAction(rowId, action, value, spotName) {
+async function updateCloudAction(rowId, action, value) {
+    // NOTE: spot name is intentionally NOT taken as a parameter — embedding
+    // spot_name in inline onclick strings breaks on any name containing a
+    // single-quote (e.g. "Jim's Bar"). We look it up from travelSpots instead.
     const target = travelSpots.find(s => s.rowid === rowId);
+    const resolvedSpotName = target ? (target.spot_name || '') : '';
+
     if (target) {
         if (action === 'update_status') target.status = value;
         if (action === 'toggle_priority') target.priority = value;
-        
-        renderList(); 
+
+        renderList();
         if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
         if (typeof renderItineraryMasterDashboardWorkspace === 'function') renderItineraryMasterDashboardWorkspace();
     }
@@ -417,7 +429,7 @@ async function updateCloudAction(rowId, action, value, spotName) {
     try {
         await fetch(API_URL, {
             method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowId, action, value, spot: spotName, deviceMeta: cachedHardwareString })
+            body: JSON.stringify({ rowId, action, value, spot: resolvedSpotName, deviceMeta: cachedHardwareString })
         });
     } catch(err) {}
 }
@@ -500,9 +512,9 @@ function switchMasterMenuDashboardTab(targetTabID) {
         updateHeaderBadgeHUDCounters();
     }
 
-    if(targetTabID === 'map' && typeof leafletMapInstance !== 'undefined' && leafletMapInstance) { 
-        setTimeout(() => { 
-            leafletMapInstance.invalidateSize(); 
+    if(targetTabID === 'map' && typeof leafletMapInstance !== 'undefined' && leafletMapInstance) {
+        setTimeout(() => {
+            leafletMapInstance.invalidateSize();
             const savedLat = localStorage.getItem('compass_map_state_lat');
             const savedLng = localStorage.getItem('compass_map_state_lng');
             const savedZoom = localStorage.getItem('compass_map_state_zoom') || '12';
@@ -511,7 +523,15 @@ function switchMasterMenuDashboardTab(targetTabID) {
             } else if(typeof gpsStatusCachedBool !== 'undefined' && gpsStatusCachedBool) {
                 leafletMapInstance.setView([userLat, userLon], 18, { animate: false });
             }
-        }, 50); 
+            // Check for nearby hidden spots whenever the user lands on the map tab
+            if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
+            // Refresh map weather widget for the current viewport centre
+            if (typeof refreshMapWeatherWidget === 'function') refreshMapWeatherWidget();
+        }, 50);
+    } else {
+        // Navigating away from map — close drawer and clear HUD
+        if (typeof closeHiddenPinsDrawer === 'function') closeHiddenPinsDrawer();
+        if (typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
     }
 }
 
@@ -669,19 +689,23 @@ function calculateSmartCityDefaultFilters() {
 
 function handleCityHUDCheckboxEventToggle(checkboxElement) {
     const val = checkboxElement.value;
-    if (checkboxElement.checked) { if(!checkedCitiesStateArray.includes(val)) checkedCitiesStateArray.push(val); } 
+    if (checkboxElement.checked) { if(!checkedCitiesStateArray.includes(val)) checkedCitiesStateArray.push(val); }
     else { checkedCitiesStateArray = checkedCitiesStateArray.filter(c => c !== val); }
     localStorage.setItem('compass_active_cities', JSON.stringify(checkedCitiesStateArray));
-    updateCityHUDTriggerButtonLabelText(); renderList(); 
+    updateCityHUDTriggerButtonLabelText(); renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+    // City filter changed — re-evaluate hidden spot proximity
+    if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
 }
 
 function clearAllSelectedCityCheckboxes() {
     checkedCitiesStateArray = []; localStorage.setItem('compass_active_cities', JSON.stringify([]));
     const checkboxes = document.getElementById('cityHUDChecklistContainer').querySelectorAll('input[type="checkbox"]');
     checkboxes.forEach(cb => cb.checked = false);
-    updateCityHUDTriggerButtonLabelText(); renderList(); 
+    updateCityHUDTriggerButtonLabelText(); renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+    // City filter cleared — no hidden spots possible, dismiss any active HUD
+    if (typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
 }
 
 function updateCityHUDTriggerButtonLabelText() {
@@ -723,11 +747,13 @@ function buildDynamicShoppingCheckboxList() {
 
 function handleCheckboxToggleEvent(checkboxElement) {
     const val = checkboxElement.value;
-    if (checkboxElement.checked) { if(!checkedFilterStateArray.includes(val)) checkedFilterStateArray.push(val); } 
+    if (checkboxElement.checked) { if(!checkedFilterStateArray.includes(val)) checkedFilterStateArray.push(val); }
     else { checkedFilterStateArray = checkedFilterStateArray.filter(i => i !== val); }
     localStorage.setItem('compass_active_filters', JSON.stringify(checkedFilterStateArray));
-    updateHeaderBadgeHUDCounters(); renderList(); 
+    updateHeaderBadgeHUDCounters(); renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+    // If type filter changed, re-evaluate whether nearby hidden spots need alerting
+    if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
 }
 
 function handleHideCompletedStateToggleCheckboxEvent(checkboxElement) {
@@ -738,12 +764,14 @@ function handleHideCompletedStateToggleCheckboxEvent(checkboxElement) {
 }
 
 function clearAllFilterCheckboxes() {
-    checkedFilterStateArray = []; 
+    checkedFilterStateArray = [];
     localStorage.setItem('compass_active_filters', JSON.stringify([]));
     const checkboxes = document.getElementById('checkboxScrollRegionContainer').querySelectorAll('input[type="checkbox"]');
     checkboxes.forEach(cb => cb.checked = false);
-    updateHeaderBadgeHUDCounters(); renderList(); 
+    updateHeaderBadgeHUDCounters(); renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+    // Type filter cleared — no hidden spots possible, dismiss any active HUD
+    if (typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
 }
 
 function updateHeaderBadgeHUDCounters() {
@@ -765,6 +793,479 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
+
+// ── Hidden Pins Alert Banner ─────────────────────────────────────────────────
+// Shows a sliding banner on the map tab when the user is within 500m of spots
+// that are hidden because both a city filter AND a type filter are active.
+// After dismissal the banner shrinks into a small red bubble with a periodic
+// attention wiggle. Tapping the bubble re-opens the banner.
+// ────────────────────────────────────────────────────────────────────────────
+
+let hiddenPinsBannerIsVisible    = false;  // sliding banner currently shown
+let hiddenPinsMiniBubbleVisible  = false;  // shrunken bubble currently shown
+let hiddenPinsBubbleAttentionLoop = null;  // setInterval handle for icon wiggle
+let hiddenPinsLastTriggeredCount  = 0;     // spot count when banner last opened
+
+function checkForNearbyHiddenSpots() {
+    // Only act when the user is on the map tab
+    if (typeof activeTabID === 'undefined' || activeTabID !== 'map') return;
+
+    // Feature only fires when BOTH a city AND a type filter are active
+    if (!checkedCitiesStateArray.length || !checkedFilterStateArray.length) {
+        clearHiddenPinsSystemHUD();
+        return;
+    }
+
+    // Need a live GPS fix to know where the user is
+    if (!gpsStatusCachedBool || typeof userLat === 'undefined' || typeof userLon === 'undefined') return;
+
+    // Count spots that pass the city filter but FAIL the type filter and are within 500 m
+    const hiddenNearbyCount = travelSpots.filter(spot => {
+        if (!checkedCitiesStateArray.includes(spot.city)) return false;             // must match city
+        const spotCats = spot.category
+            ? spot.category.split(',').map(c => c.trim().toLowerCase())
+            : [];
+        const passesType = checkedFilterStateArray.some(f => spotCats.includes(f.toLowerCase()));
+        if (passesType) return false;                                               // visible — skip
+        const lat = parseFloat(spot.latitude);
+        const lon = parseFloat(spot.longitude);
+        if (!lat || !lon) return false;                                             // no coordinates
+        return calculateDistance(userLat, userLon, lat, lon) <= 0.5;               // within 500 m
+    }).length;
+
+    if (hiddenNearbyCount > 0) {
+        // Show or refresh the banner only when neither UI element is already up
+        if (!hiddenPinsBannerIsVisible && !hiddenPinsMiniBubbleVisible) {
+            showHiddenPinsBannerHUD(hiddenNearbyCount);
+        } else {
+            hiddenPinsLastTriggeredCount = hiddenNearbyCount;   // keep count in sync
+        }
+    } else {
+        clearHiddenPinsSystemHUD();
+    }
+}
+
+function showHiddenPinsBannerHUD(count) {
+    const banner   = document.getElementById('hiddenPinsAlertBanner');
+    const subtitle = document.getElementById('hiddenPinsAlertBannerSubtitle');
+    if (!banner) return;
+
+    hiddenPinsLastTriggeredCount = count;
+
+    if (subtitle) {
+        const word = count === 1 ? 'spot' : 'spots';
+        const verb = count === 1 ? "it's" : "they're";
+        subtitle.textContent = `You're near ${count} saved ${word}, but ${verb} hidden by the active type filter.`;
+    }
+
+    // Make sure the bubble is gone before showing the banner
+    const bubble = document.getElementById('hiddenPinsMiniBubble');
+    if (bubble) bubble.classList.add('hidden');
+    hiddenPinsMiniBubbleVisible = false;
+    stopHiddenPinsBubbleAttentionLoop();
+
+    // Trigger slide-in animation (force reflow to replay it if already animated)
+    banner.classList.remove('hidden-pins-banner-enter', 'hidden-pins-banner-exit');
+    banner.classList.remove('hidden');
+    void banner.offsetWidth;
+    banner.classList.add('hidden-pins-banner-enter');
+    hiddenPinsBannerIsVisible = true;
+}
+
+function dismissHiddenPinsBannerToMiniBubble() {
+    const banner = document.getElementById('hiddenPinsAlertBanner');
+    const bubble = document.getElementById('hiddenPinsMiniBubble');
+    if (!banner) return;
+
+    // Slide banner back up
+    banner.classList.remove('hidden-pins-banner-enter');
+    banner.classList.add('hidden-pins-banner-exit');
+
+    setTimeout(() => {
+        banner.classList.add('hidden');
+        banner.classList.remove('hidden-pins-banner-exit');
+        hiddenPinsBannerIsVisible = false;
+
+        // Reveal the mini bubble and start its attention loop
+        if (bubble) {
+            bubble.classList.remove('hidden');
+            hiddenPinsMiniBubbleVisible = true;
+            startHiddenPinsBubbleAttentionLoop();
+        }
+    }, 280);
+}
+
+function unhideHiddenPinsBannerAction() {
+    // Clear the type filter so all pins in the active city become visible again
+    clearAllFilterCheckboxes();
+    clearHiddenPinsSystemHUD();
+}
+
+function clearHiddenPinsSystemHUD() {
+    const banner = document.getElementById('hiddenPinsAlertBanner');
+    const bubble = document.getElementById('hiddenPinsMiniBubble');
+
+    if (banner && !banner.classList.contains('hidden')) {
+        banner.classList.remove('hidden-pins-banner-enter');
+        banner.classList.add('hidden-pins-banner-exit');
+        setTimeout(() => {
+            banner.classList.add('hidden');
+            banner.classList.remove('hidden-pins-banner-exit');
+        }, 260);
+    }
+    hiddenPinsBannerIsVisible = false;
+
+    if (bubble) bubble.classList.add('hidden');
+    hiddenPinsMiniBubbleVisible   = false;
+    hiddenPinsLastTriggeredCount  = 0;
+    stopHiddenPinsBubbleAttentionLoop();
+
+    // Also close the drawer if it happens to be open
+    if (typeof closeHiddenPinsDrawer === 'function') closeHiddenPinsDrawer();
+}
+
+function startHiddenPinsBubbleAttentionLoop() {
+    stopHiddenPinsBubbleAttentionLoop();
+
+    const fireWiggle = () => {
+        if (!hiddenPinsMiniBubbleVisible) return;
+        const icon = document.getElementById('hiddenPinsMiniBubbleIcon');
+        if (!icon) return;
+        icon.classList.remove('hidden-pins-bubble-attention');
+        void icon.offsetWidth;
+        icon.classList.add('hidden-pins-bubble-attention');
+        // Clean up class once the animation finishes so it can replay next time
+        setTimeout(() => icon.classList.remove('hidden-pins-bubble-attention'), 800);
+    };
+
+    // First wiggle after 2.5 s so the bubble has a moment to settle
+    setTimeout(fireWiggle, 2500);
+    // Then repeat every 6 s
+    hiddenPinsBubbleAttentionLoop = setInterval(fireWiggle, 6000);
+}
+
+function stopHiddenPinsBubbleAttentionLoop() {
+    if (hiddenPinsBubbleAttentionLoop !== null) {
+        clearInterval(hiddenPinsBubbleAttentionLoop);
+        hiddenPinsBubbleAttentionLoop = null;
+    }
+}
+
+function reopenHiddenPinsBanner() {
+    // Bubble tap now opens the detailed drawer instead of the simple banner
+    openHiddenPinsDrawer();
+}
+
+// ── Hidden Pins Drawer ───────────────────────────────────────────────────────
+// Left-side slide-in panel that lists every spot hidden by the active type
+// filter, grouped into Starred and Unstarred sections.
+// Each row shows the category icon, spot name, a reference link, and a
+// per-spot Unhide button that adds that spot's category to the type filter.
+// "Unhide All" at the bottom clears the type filter entirely.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Maps a category string to a Font Awesome icon class + colour class pair.
+// Used by the drawer rows, the list-card badges, and the map-tray badge.
+// Mirrors the marker icon logic in map.js so all three views stay in sync.
+function getCategoryIconClass(category) {
+    const s = (category || "").toLowerCase();
+    if (s.includes("photo"))     return "fa-camera-retro text-pink-500";
+    if (s.includes("food"))      return "fa-utensils text-orange-500";
+    if (s.includes("viewpoint")) return "fa-binoculars text-sky-500";
+    if (s.includes("nature"))    return "fa-leaf text-emerald-500";
+    if (s.includes("culture"))   return "fa-landmark text-violet-500";
+    if (s.includes("shopping") || s.includes("shop")) return "fa-bag-shopping text-rose-500";
+    if (s.includes("activity"))  return "fa-person-running text-amber-500";
+    if (s.includes("relax"))     return "fa-spa text-teal-500";
+    if (s.includes("nightlife") || s.includes("bar") || s.includes("drink")) return "fa-martini-glass text-indigo-500";
+    return "fa-location-dot text-slate-400";
+}
+// Legacy alias — keeps the drawer code working without any other edits
+const getCategoryIconClassForDrawer = getCategoryIconClass;
+
+// ── Weather helpers ──────────────────────────────────────────────────────────
+// Maps OpenWeatherMap icon codes (e.g. "01d", "10n") → Font Awesome 6 Free class strings.
+function getWeatherFAIconClass(owmIconCode) {
+    const c = (owmIconCode || '').substring(0, 2);
+    if (c === '01') return 'fa-sun text-yellow-400';
+    if (c === '02') return 'fa-cloud-sun text-yellow-300';
+    if (c === '03') return 'fa-cloud text-slate-400';
+    if (c === '04') return 'fa-cloud text-slate-500';
+    if (c === '09') return 'fa-cloud-showers-heavy text-blue-400';
+    if (c === '10') return 'fa-cloud-rain text-blue-400';
+    if (c === '11') return 'fa-cloud-bolt text-amber-400';
+    if (c === '13') return 'fa-snowflake text-sky-300';
+    if (c === '50') return 'fa-smog text-slate-400';
+    return 'fa-cloud text-slate-400';
+}
+
+// Fetches current weather for the given lat/lon. Results are cached for 30 min.
+// Returns { iconClass, temp } on success, or null on network error.
+async function fetchWeatherForCoords(lat, lon) {
+    const key    = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+    const cached = weatherCache.get(key);
+    if (cached && (Date.now() - cached.fetchedAt) < WEATHER_CACHE_TTL) return cached;
+    try {
+        const res  = await fetch(
+            `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${OWM_API_KEY}`
+        );
+        const data = await res.json();
+        const iconClass  = getWeatherFAIconClass(data.weather?.[0]?.icon || '');
+        const temp       = Math.round(data.main?.temp       ?? 0);
+        const feelsLike  = Math.round(data.main?.feels_like ?? data.main?.temp ?? 0);
+        const result     = { iconClass, temp, feelsLike, fetchedAt: Date.now() };
+        weatherCache.set(key, result);
+        return result;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Walks all currently-rendered list cards and fills in their weather badges.
+// Skips spots with no coordinates (they show the disabled state from render time).
+async function refreshAllWeatherBadges() {
+    for (const spot of travelSpots) {
+        const latStr = spot.latitude  ? String(spot.latitude).trim()  : '';
+        const lngStr = spot.longitude ? String(spot.longitude).trim() : '';
+        if (!latStr || latStr === '0' || !lngStr || lngStr === '0') continue;
+        const el = document.getElementById(`weather-badge-${spot.rowid}`);
+        if (!el) continue;
+        const w = await fetchWeatherForCoords(parseFloat(latStr), parseFloat(lngStr));
+        if (w) {
+            el.innerHTML = `<i class="fa-solid ${w.iconClass} text-[10px]"></i><span>${w.temp}°</span>`;
+        }
+    }
+}
+
+function openHiddenPinsDrawer() {
+    const overlay = document.getElementById('hiddenPinsDrawerOverlay');
+    const panel   = document.getElementById('hiddenPinsDrawerPanel');
+    if (!overlay || !panel) return;
+
+    // Stop the bubble's attention wiggle while the drawer is open
+    stopHiddenPinsBubbleAttentionLoop();
+
+    renderHiddenPinsDrawerContent();
+
+    overlay.classList.remove('hidden');
+    panel.classList.remove('hidden-pins-drawer-enter', 'hidden-pins-drawer-exit');
+    void panel.offsetWidth;
+    panel.classList.add('hidden-pins-drawer-enter');
+}
+
+function renderHiddenPinsDrawerContent() {
+    const body       = document.getElementById('hiddenPinsDrawerBody');
+    const countLabel = document.getElementById('hiddenPinsDrawerCount');
+    if (!body) return;
+
+    // Collect ALL spots hidden by the type filter (not just nearby ones —
+    // the drawer gives the user the full picture)
+    const hiddenSpots = travelSpots.filter(spot => {
+        if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(spot.city)) return false;
+        if (!checkedFilterStateArray.length) return false;
+        const spotCats = spot.category
+            ? spot.category.split(',').map(c => c.trim().toLowerCase())
+            : [];
+        return !checkedFilterStateArray.some(f => spotCats.includes(f.toLowerCase()));
+    });
+
+    if (countLabel) {
+        const n = hiddenSpots.length;
+        countLabel.textContent = n === 0 ? 'All spots are visible' : `${n} spot${n !== 1 ? 's' : ''} hidden by type filter`;
+    }
+
+    body.innerHTML = '';
+
+    if (hiddenSpots.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'flex flex-col items-center justify-center py-12 gap-3';
+        empty.innerHTML = `
+            <div class="w-11 h-11 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+                <i class="fa-solid fa-eye text-emerald-400 text-base"></i>
+            </div>
+            <p class="text-[11px] text-slate-400 font-bold">All spots are now visible!</p>`;
+        body.appendChild(empty);
+        return;
+    }
+
+    const isStarredFn = s => ['high', '🔥', 'must do', 'starred'].includes((s.priority || "").toLowerCase());
+    const starred   = hiddenSpots.filter(isStarredFn);
+    const unstarred = hiddenSpots.filter(s => !isStarredFn(s));
+
+    if (starred.length > 0) {
+        body.appendChild(buildDrawerSection(
+            'Starred', 'fa-star text-amber-400', starred
+        ));
+    }
+    if (unstarred.length > 0) {
+        body.appendChild(buildDrawerSection(
+            'Unstarred', 'fa-location-dot text-slate-500', unstarred
+        ));
+    }
+}
+
+function buildDrawerSection(title, titleIconClass, spots) {
+    const section = document.createElement('div');
+    section.className = 'space-y-2';
+
+    // Section label
+    const labelRow = document.createElement('div');
+    labelRow.className = 'flex items-center gap-1.5 px-1 mb-1.5';
+    labelRow.innerHTML = `
+        <i class="fa-solid ${titleIconClass} text-[9px]"></i>
+        <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">${title}</span>
+        <span class="text-[9px] font-mono text-slate-600">(${spots.length})</span>`;
+    section.appendChild(labelRow);
+
+    spots.forEach(spot => {
+        section.appendChild(buildDrawerRow(spot));
+    });
+
+    return section;
+}
+
+function buildDrawerRow(spot) {
+    // Use only the first category token so the unhide button targets exactly
+    // one category, avoiding ambiguity on multi-category spots.
+    const rawCat    = (spot.category || 'General').split(',')[0].trim();
+    const iconClass = getCategoryIconClassForDrawer(rawCat);
+    const isStarred = ['high', '🔥', 'must do', 'starred'].includes((spot.priority || "").toLowerCase());
+
+    const row = document.createElement('div');
+    row.className = `flex items-center gap-2.5 rounded-xl px-3 py-2.5 border ${isStarred ? 'bg-amber-500/5 border-amber-500/15' : 'bg-slate-950/50 border-slate-800/60'}`;
+
+    // ── Category icon ────────────────────────────────────────────────────────
+    const iconWrap = document.createElement('div');
+    iconWrap.className = 'w-8 h-8 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0';
+    iconWrap.innerHTML = `<i class="fa-solid ${iconClass} text-[13px]"></i>`;
+
+    // ── Name + category label ────────────────────────────────────────────────
+    const textWrap = document.createElement('div');
+    textWrap.className = 'flex-1 min-w-0';
+
+    const nameEl = document.createElement('p');
+    nameEl.className = 'text-[11px] font-bold text-slate-200 truncate';
+    nameEl.textContent = spot.spot_name || 'Unnamed';   // textContent is injection-safe
+
+    const catEl = document.createElement('p');
+    catEl.className = 'text-[9px] text-slate-500 truncate mt-0.5';
+    catEl.textContent = rawCat;
+
+    textWrap.appendChild(nameEl);
+    textWrap.appendChild(catEl);
+
+    // ── Action buttons ───────────────────────────────────────────────────────
+    const btnWrap = document.createElement('div');
+    btnWrap.className = 'flex items-center gap-1.5 shrink-0';
+
+    // Reference link button
+    const linkBtn = document.createElement('a');
+    linkBtn.href      = spot.instagram_url || '#';
+    linkBtn.target    = '_blank';
+    linkBtn.className = 'w-7 h-7 bg-slate-800 border border-slate-700 rounded-lg flex items-center justify-center text-slate-400 active:bg-slate-700 text-[11px]';
+    linkBtn.innerHTML = '<i class="fa-solid fa-link"></i>';
+
+    // Unhide button — closure captures rawCat directly; no inline string injection
+    const unhideBtn = document.createElement('button');
+    unhideBtn.className = 'w-7 h-7 bg-pink-500/10 border border-pink-500/20 rounded-lg flex items-center justify-center text-pink-400 active:bg-pink-500/20 text-[11px]';
+    unhideBtn.innerHTML = '<i class="fa-solid fa-eye-slash"></i>';
+    unhideBtn.title     = `Unhide "${rawCat}"`;
+    unhideBtn.addEventListener('click', function() {
+        unhideSpecificSpotCategory(rawCat);
+    });
+
+    btnWrap.appendChild(linkBtn);
+    btnWrap.appendChild(unhideBtn);
+
+    row.appendChild(iconWrap);
+    row.appendChild(textWrap);
+    row.appendChild(btnWrap);
+
+    return row;
+}
+
+function closeHiddenPinsDrawer() {
+    const overlay = document.getElementById('hiddenPinsDrawerOverlay');
+    const panel   = document.getElementById('hiddenPinsDrawerPanel');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+
+    panel.classList.remove('hidden-pins-drawer-enter');
+    panel.classList.add('hidden-pins-drawer-exit');
+
+    setTimeout(() => {
+        overlay.classList.add('hidden');
+        panel.classList.remove('hidden-pins-drawer-exit');
+        // Restart bubble attention loop if the bubble is still on screen
+        if (hiddenPinsMiniBubbleVisible) startHiddenPinsBubbleAttentionLoop();
+    }, 240);
+}
+
+function unhideSpecificSpotCategory(categoryRaw) {
+    const catLower = (categoryRaw || '').toLowerCase().trim();
+
+    // Find canonical casing from the live travelSpots data
+    const allCats = new Set();
+    travelSpots.forEach(s => {
+        if (s.category) s.category.split(',').forEach(c => allCats.add(c.trim()));
+    });
+
+    let canonical = categoryRaw; // fallback to whatever was passed
+    allCats.forEach(c => {
+        if (c.toLowerCase() === catLower) canonical = c;
+    });
+
+    // Add to the type filter if not already present
+    if (!checkedFilterStateArray.map(c => c.toLowerCase()).includes(catLower)) {
+        checkedFilterStateArray.push(canonical);
+        localStorage.setItem('compass_active_filters', JSON.stringify(checkedFilterStateArray));
+
+        // Keep the checkbox UI in sync with the filter state
+        const checkboxes = document.getElementById('checkboxScrollRegionContainer')
+            ? document.getElementById('checkboxScrollRegionContainer').querySelectorAll('input[type="checkbox"]')
+            : [];
+        checkboxes.forEach(cb => {
+            if (cb.value.toLowerCase() === catLower) cb.checked = true;
+        });
+
+        updateHeaderBadgeHUDCounters();
+        renderList();
+        if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+    }
+
+    // Refresh the drawer content to reflect the newly visible spot
+    renderHiddenPinsDrawerContent();
+
+    // If no more hidden spots exist, auto-close the drawer and clear the HUD
+    if (!hiddenPinsDrawerHasRemainingSpots()) {
+        closeHiddenPinsDrawer();
+        setTimeout(() => clearHiddenPinsSystemHUD(), 260);
+    }
+}
+
+function unhideAllAndCloseDrawer() {
+    closeHiddenPinsDrawer();
+    // Wait for the slide-out to finish before blowing away the filter state
+    setTimeout(() => {
+        clearAllFilterCheckboxes();
+        clearHiddenPinsSystemHUD();
+    }, 260);
+}
+
+// Returns true when at least one spot is still hidden by the type filter
+function hiddenPinsDrawerHasRemainingSpots() {
+    if (!checkedFilterStateArray.length) return false;
+    return travelSpots.some(spot => {
+        if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(spot.city)) return false;
+        const spotCats = spot.category
+            ? spot.category.split(',').map(c => c.trim().toLowerCase())
+            : [];
+        return !checkedFilterStateArray.some(f => spotCats.includes(f.toLowerCase()));
+    });
+}
+
+// ── End Hidden Pins Drawer ────────────────────────────────────────────────────
+
+// ── End Hidden Pins Alert Banner ─────────────────────────────────────────────
 
 function getFilteredDatasetRows() {
     return travelSpots.map(spot => {
@@ -918,17 +1419,34 @@ function renderList() {
         cardWrapper.id = uniqueCardContainerId;
         cardWrapper.className = "dynamic-card-node w-full min-h-[260px] h-auto flip-perspective-container transform transition-transform duration-200 shrink-0 block";
 
+        // Category icon class for the badge (icon · category · city)
+        const catIconClass = getCategoryIconClass(spot.category);
+
+        // Weather badge — disabled placeholder when coordinates are missing;
+        // refreshAllWeatherBadges() will fill in real data after render.
+        // No-coords: visible grey box, same min-width as the live weather badge
+        // so both states stay horizontally consistent regardless of content.
+        const weatherBadgeClass = !hasCoordinates
+            ? 'bg-slate-700/40 text-slate-500'
+            : 'bg-sky-500/10 text-sky-300';
+        const weatherBadgeInitHTML = !hasCoordinates
+            ? `<i class="fa-solid fa-cloud text-[10px]" style="opacity:0.35"></i><i class="fa-solid fa-slash text-[7px]" style="margin-left:-0.55em;opacity:0.35"></i>`
+            : `<i class="fa-solid fa-cloud text-[10px] opacity-40"></i>`;
+
         cardWrapper.innerHTML = `
             <div class="flip-card-inner-rotator w-full h-full">
-                
-                <div class="flip-card-front-face w-full h-full p-4 rounded-2xl border bg-slate-900 border-slate-800 flex flex-col justify-between">
+
+                <div class="flip-card-front-face w-full h-full p-4 rounded-2xl border bg-slate-900 ${isHigh ? 'starred-gold-glow' : 'border-slate-800'} flex flex-col justify-between">
                     <div>
                         <div class="flex justify-between items-start gap-2">
                             <div class="max-w-[70%]">
-                                <span class="text-[9px] uppercase px-2 py-0.5 rounded bg-slate-950 text-slate-400 font-bold border border-slate-800">${spot.city} • ${spot.category}</span>
+                                <span class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800"><i class="fa-solid ${catIconClass} text-[8px] shrink-0"></i><span class="uppercase tracking-wider">${spot.category || 'General'}</span><span class="text-slate-700 font-normal">•</span><span class="uppercase tracking-wider text-slate-500">${spot.city || 'Global'}</span></span>
                                 <h3 class="text-base font-bold ${isDone ? 'text-slate-500 line-through' : 'text-slate-200'} mt-1.5 truncate">${spot.spot_name}</h3>
                             </div>
-                            <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit ${!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400'}">${spot.distStr}</span>
+                            <div class="flex items-stretch gap-1.5 shrink-0">
+                                <span id="weather-badge-${spot.rowid}" class="inline-flex items-center justify-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg min-w-[3.25rem] ${weatherBadgeClass}">${weatherBadgeInitHTML}</span>
+                                <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg h-fit ${!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400'}">${spot.distStr}</span>
+                            </div>
                         </div>
                         <div class="mt-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60 min-h-[90px] overflow-hidden">
                             <p class="text-xs ${isDone ? 'text-slate-500 line-through' : 'text-slate-400'} leading-relaxed max-h-16 overflow-hidden pr-1" style="touch-action: pan-y;" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)">${spot.notes || 'No custom notes.'}</p>
@@ -946,12 +1464,12 @@ function renderList() {
                             <button onclick="handleManualInlineCardFlipExecution(event, '${uniqueCardContainerId}', 'forward')" class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
                                 <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
                             </button>
-                            <button onclick="updateCloudAction(${spot.rowid}, 'update_status', '${isDone ? 'Pending' : 'Done'}', '${spot.spot_name}')" class="text-xs px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-bold active:bg-slate-855">${isDone ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo' : '<i class="fa-solid fa-check mr-1"></i> Mark Done'}</button>
-                            <button onclick="updateCloudAction(${spot.rowid}, 'toggle_priority', '${isHigh ? 'Normal' : 'Starred'}', '${spot.spot_name}')" class="text-xs px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-amber-400">${isHigh ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star'}</button>
+                            <button onclick="updateCloudAction(${spot.rowid}, 'update_status', '${isDone ? 'Pending' : 'Done'}')" class="text-xs px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-bold active:bg-slate-855">${isDone ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo' : '<i class="fa-solid fa-check mr-1"></i> Mark Done'}</button>
+                            <button onclick="updateCloudAction(${spot.rowid}, 'toggle_priority', '${isHigh ? 'Normal' : 'Starred'}')" class="text-xs px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-amber-400">${isHigh ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star'}</button>
                         </div>
                     </div>
                 </div>
-                <div class="flip-card-back-face w-full h-full p-4 rounded-2xl border bg-slate-900 border-slate-800 flex flex-col justify-between overflow-hidden">
+                <div class="flip-card-back-face w-full h-full p-4 rounded-2xl border bg-slate-900 ${isHigh ? 'starred-gold-glow' : 'border-slate-800'} flex flex-col justify-between overflow-hidden">
                     <div class="flex border-b border-slate-800/60 pb-1.5 shrink-0 items-center justify-between">
                         <span class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Extra Info</span>
                         <span class="text-[8px] text-slate-600 font-mono">ID: #${spot.rowid}</span>
@@ -959,17 +1477,6 @@ function renderList() {
                     <div class="flex-1 overflow-y-auto subtle-scrollbar my-2 pr-0.5 space-y-3 text-[11px]">
                         <p class="text-slate-300 leading-relaxed font-medium bg-slate-950/50 border border-slate-950 p-2.5 rounded-xl">${(spot.long_description && spot.long_description !== "N/A") ? spot.long_description : 'No background summary recorded.'}</p>
                         
-                        <div class="space-y-1">
-                            <span class="text-[8px] font-black uppercase tracking-widest text-pink-500 block">Itinerary Mapping Tracker</span>
-                            <div class="bg-slate-950 border border-slate-955 p-2 rounded-xl flex items-center justify-between gap-2">
-                                <span class="font-bold text-slate-400 uppercase tracking-wide text-[9px]">Map to Schedule:</span>
-                                <div class="flex gap-1">
-                                    <button onclick="if(typeof injectActiveSpotToItineraryDay === 'function') injectActiveSpotToItineraryDay(1, ${spot.rowid}, event)" class="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-[9px] font-bold">D1</button>
-                                    <button onclick="if(typeof injectActiveSpotToItineraryDay === 'function') injectActiveSpotToItineraryDay(2, ${spot.rowid}, event)" class="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-[9px] font-bold">D2</button>
-                                    <button onclick="if(typeof injectActiveSpotToItineraryDay === 'function') injectActiveSpotToItineraryDay(3, ${spot.rowid}, event)" class="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-[9px] font-bold">D3</button>
-                                </div>
-                            </div>
-                        </div>
                         <div>
                             <span class="text-[8px] font-black uppercase tracking-widest text-slate-500 block mb-0.5">Schedule</span>
                             <div class="bg-slate-950/50 border border-slate-950 p-2.5 rounded-xl font-mono text-[10px] text-slate-400 space-y-0.5">${hoursHTMLTokens}</div>
@@ -1003,6 +1510,9 @@ function renderList() {
     const physicalScrollSpacer = document.createElement('div');
     physicalScrollSpacer.className = "dynamic-spacer-node h-16 shrink-0 block w-full";
     scrollContainerFrame.appendChild(physicalScrollSpacer);
+
+    // Kick off async weather fetches — runs after the DOM is painted
+    setTimeout(refreshAllWeatherBadges, 0);
 }
 
 function toggleSettingsMenu(show) {
