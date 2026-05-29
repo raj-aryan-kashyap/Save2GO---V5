@@ -438,7 +438,14 @@ async function updateCloudAction(rowId, action, value) {
         if (action === 'update_status') target.status = value;
         if (action === 'toggle_priority') target.priority = value;
 
-        renderList();
+        // Use the animated renderer so cards glide to their new sorted positions
+        // instead of snapping instantly.  Falls back to a plain renderList() when
+        // the list panel is not active (animation would have no visible effect).
+        if (activeTabID === 'list') {
+            renderListAnimated(rowId, action, value);
+        } else {
+            renderList();
+        }
         if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
         if (typeof renderItineraryMasterDashboardWorkspace === 'function') renderItineraryMasterDashboardWorkspace();
     }
@@ -707,7 +714,16 @@ function calculateSmartCityDefaultFilters() {
     const container = document.getElementById('cityHUDChecklistContainer');
     if (!container) return; container.innerHTML = '';
     let citySet = new Set();
-    travelSpots.forEach(spot => { if (spot.city && String(spot.city).trim() !== "") citySet.add(spot.city.trim()); });
+    // On the itinerary tab build the city list from itinerary data, not spots.
+    if (activeTabID === 'itinerary') {
+        if (typeof savedItineraries !== 'undefined') {
+            savedItineraries.forEach(itin => {
+                if (itin.city && String(itin.city).trim() !== '') citySet.add(itin.city.trim());
+            });
+        }
+    } else {
+        travelSpots.forEach(spot => { if (spot.city && String(spot.city).trim() !== "") citySet.add(spot.city.trim()); });
+    }
     if (citySet.size === 0) {
         container.innerHTML = `<div class="text-slate-500 text-[11px] p-2">No cities recorded</div>`; return;
     }
@@ -726,20 +742,32 @@ function handleCityHUDCheckboxEventToggle(checkboxElement) {
     if (checkboxElement.checked) { if(!checkedCitiesStateArray.includes(val)) checkedCitiesStateArray.push(val); }
     else { checkedCitiesStateArray = checkedCitiesStateArray.filter(c => c !== val); }
     localStorage.setItem('compass_active_cities', JSON.stringify(checkedCitiesStateArray));
-    updateCityHUDTriggerButtonLabelText(); renderList();
-    if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
-    // City filter changed — re-evaluate hidden spot proximity
-    if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
+    updateCityHUDTriggerButtonLabelText();
+    if (activeTabID === 'itinerary') {
+        // On the itinerary tab, re-render the itinerary master list
+        if (typeof renderItineraryMasterDashboardWorkspace === 'function') renderItineraryMasterDashboardWorkspace();
+    } else {
+        renderList();
+        if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+        // City filter changed — re-evaluate hidden spot proximity
+        if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
+    }
 }
 
 function clearAllSelectedCityCheckboxes() {
     checkedCitiesStateArray = []; localStorage.setItem('compass_active_cities', JSON.stringify([]));
     const checkboxes = document.getElementById('cityHUDChecklistContainer').querySelectorAll('input[type="checkbox"]');
     checkboxes.forEach(cb => cb.checked = false);
-    updateCityHUDTriggerButtonLabelText(); renderList();
-    if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
-    // City filter cleared — no hidden spots possible, dismiss any active HUD
-    if (typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
+    updateCityHUDTriggerButtonLabelText();
+    if (activeTabID === 'itinerary') {
+        // On the itinerary tab, re-render the itinerary master list
+        if (typeof renderItineraryMasterDashboardWorkspace === 'function') renderItineraryMasterDashboardWorkspace();
+    } else {
+        renderList();
+        if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+        // City filter cleared — no hidden spots possible, dismiss any active HUD
+        if (typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
+    }
 }
 
 function updateCityHUDTriggerButtonLabelText() {
@@ -1410,6 +1438,163 @@ function handleAdaptiveDirectionClick(buttonElement, event) {
     }
 }
 
+/**
+ * Animated wrapper around renderList() — uses the FLIP technique so existing
+ * cards glide to their new sorted positions instead of teleporting.
+ *
+ * Two special cases are handled:
+ *  a) "Mark Done" with hideCompletedSpotsStateBool = true → card slides out
+ *     and collapses before the list is rebuilt (card disappears from view).
+ *  b) All other reorders → snapshot old positions, rebuild, then FLIP-animate
+ *     each card from its snapshot position to its new position.
+ *
+ * A contextual flash animation runs on the card that triggered the action:
+ *   • Mark Done  → slate ripple (card-flash-done)
+ *   • Undo Done  → pink ripple  (card-flash-undo)
+ *   • Star       → amber glow   (card-flash-star)
+ *   • Unstar     → no flash (motion alone is sufficient feedback)
+ *
+ * @param {number|string} triggeredRowId  rowid of the spot that changed
+ * @param {string}        action          'update_status' | 'toggle_priority'
+ * @param {string}        value           new value passed to updateCloudAction
+ */
+function renderListAnimated(triggeredRowId, action, value) {
+    const strId = String(triggeredRowId);
+
+    // ── Case A: done card disappears (hide-completed mode) ───────────────────
+    // Animate the card out first, THEN rebuild — avoids a jarring instant vanish.
+    if (action === 'update_status' && value === 'Done' && hideCompletedSpotsStateBool) {
+        const cardEl = document.querySelector(`.dynamic-card-node[data-rowid="${strId}"]`);
+        if (cardEl) {
+            const cardH = cardEl.offsetHeight;
+            // Phase 1: slide right + fade out
+            cardEl.style.transition = 'transform 0.26s ease-in, opacity 0.22s ease-in';
+            cardEl.style.transform  = 'translateX(48px)';
+            cardEl.style.opacity    = '0';
+            cardEl.style.overflow   = 'hidden';
+            // Phase 2: collapse height so the gap closes smoothly
+            setTimeout(() => {
+                cardEl.style.transition += ', max-height 0.22s ease-in, margin-bottom 0.22s ease-in, padding 0.22s ease-in';
+                cardEl.style.maxHeight    = cardH + 'px';
+                void cardEl.offsetHeight; // flush
+                cardEl.style.maxHeight    = '0px';
+                cardEl.style.marginBottom = '0px';
+            }, 200);
+            // Phase 3: rebuild after animation completes
+            setTimeout(() => renderList(), 440);
+            return;
+        }
+    }
+
+    // ── Inner helper: FLIP snapshot → rebuild → slide animation ──────────────
+    // skipFlash=true when the burst was already played in-place (star action)
+    // so it doesn't fire a second time once the card arrives at its new position.
+    function _doFlipReorder(skipFlash) {
+        // 1. Snapshot every card's current Y position, keyed by rowid
+        const snapBefore = new Map();
+        document.querySelectorAll('.dynamic-card-node[data-rowid]').forEach(el => {
+            snapBefore.set(el.dataset.rowid, el.getBoundingClientRect().top);
+        });
+
+        // 2. Rebuild the list DOM (synchronous)
+        renderList();
+
+        // 3. Animate — two rAF frames: first sets displaced initial state (no paint),
+        //    second applies the transition so the browser animates from there to 0.
+        requestAnimationFrame(() => {
+            const allCards = [...document.querySelectorAll('.dynamic-card-node[data-rowid]')];
+
+            // Batch reads first (avoid layout thrashing)
+            const entries = allCards.map(el => ({
+                el,
+                rowid:  el.dataset.rowid,
+                newTop: el.getBoundingClientRect().top,
+            }));
+
+            // Batch writes — set each card at its old visual position instantly
+            entries.forEach(({ el, rowid, newTop }) => {
+                const oldTop = snapBefore.get(rowid);
+                if (oldTop !== undefined) {
+                    const deltaY = oldTop - newTop;
+                    if (Math.abs(deltaY) > 1) {
+                        el.style.transition = 'none';
+                        el.style.transform  = `translateY(${deltaY}px)`;
+                        el.dataset.animMove = '1';
+                    }
+                } else {
+                    // Card is newly visible (e.g. undo on a hidden done card)
+                    el.style.opacity    = '0';
+                    el.dataset.animFade = '1';
+                }
+            });
+
+            // Force a synchronous layout pass so the browser registers the displaced
+            // transforms before we apply the transition in the next frame
+            void allCards[0]?.offsetHeight;
+
+            requestAnimationFrame(() => {
+                const EASE = 'cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+
+                entries.forEach(({ el }) => {
+                    if (el.dataset.animMove) {
+                        el.style.transition = `transform 0.42s ${EASE}`;
+                        el.style.transform  = 'translateY(0)';
+                        delete el.dataset.animMove;
+                    } else if (el.dataset.animFade) {
+                        el.style.transition = 'opacity 0.32s ease';
+                        el.style.opacity    = '1';
+                        delete el.dataset.animFade;
+                    }
+                });
+
+                if (!skipFlash) {
+                    // Contextual flash on the card that triggered the action
+                    const tEl = document.querySelector(`.dynamic-card-node[data-rowid="${strId}"]`);
+                    if (tEl) {
+                        let flashClass = null;
+                        if (action === 'update_status') {
+                            flashClass = value === 'Done' ? 'card-flash-done' : 'card-flash-undo';
+                        } else if (action === 'toggle_priority' && value === 'Starred') {
+                            flashClass = 'card-flash-star';
+                        }
+                        if (flashClass) {
+                            tEl.classList.add(flashClass);
+                            // animationend fires on the child that holds the keyframe
+                            const frontFace = tEl.querySelector('.flip-card-front-face');
+                            (frontFace || tEl).addEventListener(
+                                'animationend',
+                                () => tEl.classList.remove(flashClass),
+                                { once: true }
+                            );
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    // ── Case B-star: flash in-place first, THEN reorder ──────────────────────
+    // Without this, the card jumps to the top and the amber burst fires there,
+    // making the glow imperceptible at the position the user tapped.
+    // Sequence: burst at current position → animationend → FLIP slide to top.
+    if (action === 'toggle_priority' && value === 'Starred') {
+        const cardEl = document.querySelector(`.dynamic-card-node[data-rowid="${strId}"]`);
+        if (cardEl) {
+            cardEl.classList.add('card-flash-star');
+            const frontFace = cardEl.querySelector('.flip-card-front-face');
+            (frontFace || cardEl).addEventListener('animationend', () => {
+                cardEl.classList.remove('card-flash-star');
+                _doFlipReorder(true); // skipFlash — burst already played in-place
+            }, { once: true });
+            return; // reorder deferred until after the flash
+        }
+        // Card not found in DOM — fall through to normal reorder below
+    }
+
+    // ── Case B: FLIP reorder for all other actions ────────────────────────────
+    _doFlipReorder(false);
+}
+
 function renderList() {
     const scrollContainerFrame = document.getElementById('gesture-touch-container');
     const counterHUD = document.getElementById('vaultDensityHUDLabelCounter');
@@ -1421,11 +1606,29 @@ function renderList() {
     const processed = getFilteredDatasetRows();
     if (counterHUD) counterHUD.innerText = `Showing ${processed.length} / ${travelSpots.length} Spots`;
     
-    if(processed.length === 0) {
-        const errorDiv = document.createElement('div');
-        errorDiv.className = "dynamic-empty-node text-center text-slate-600 py-12 text-xs w-full block shrink-0";
-        errorDiv.innerText = "No entries loaded matching these selection profiles.";
-        scrollContainerFrame.appendChild(errorDiv);
+    if (processed.length === 0) {
+        const emptyDiv = document.createElement('div');
+        emptyDiv.className = "dynamic-empty-node w-full block shrink-0";
+        if (showStarredOnly) {
+            // Starred filter active but no starred spots — match the itinerary master empty state
+            emptyDiv.innerHTML = `
+                <div class="flex flex-col items-center justify-center py-16 text-center px-6">
+                    <i class="fa-regular fa-star text-3xl text-slate-700 mb-4"></i>
+                    <p class="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">No starred spots</p>
+                    <p class="text-[11px] text-slate-600 font-medium">Star a spot to save it here.</p>
+                    <button onclick="setPriorityFilterState(false)"
+                            class="mt-5 px-5 py-2 bg-slate-900 border border-slate-800 rounded-xl text-[10px] font-black text-slate-400 active:bg-slate-800 transition-colors">
+                        Show All
+                    </button>
+                </div>`;
+        } else {
+            // Generic empty state (city filter, search, etc.)
+            emptyDiv.innerHTML = `
+                <div class="text-center text-slate-600 py-12 text-xs">
+                    No entries loaded matching these selection profiles.
+                </div>`;
+        }
+        scrollContainerFrame.appendChild(emptyDiv);
         return;
     }
 
@@ -1453,6 +1656,7 @@ function renderList() {
 
         const cardWrapper = document.createElement('div');
         cardWrapper.id = uniqueCardContainerId;
+        cardWrapper.dataset.rowid = String(spot.rowid); // used by renderListAnimated FLIP engine
         cardWrapper.className = "dynamic-card-node w-full min-h-[260px] h-auto flip-perspective-container transform transition-transform duration-200 shrink-0 block";
 
         // Category icon class for the badge (icon · category · city)
@@ -1472,16 +1676,16 @@ function renderList() {
         cardWrapper.innerHTML = `
             <div class="flip-card-inner-rotator w-full h-full">
 
-                <div class="flip-card-front-face w-full h-full p-4 rounded-2xl border bg-slate-900 ${isHigh ? 'starred-gold-glow' : 'border-slate-800'} flex flex-col justify-between">
+                <div class="flip-card-front-face w-full h-full p-4 rounded-2xl border flex flex-col justify-between ${isDone ? 'itin-done-card' : 'bg-slate-900 ' + (isHigh ? 'starred-gold-glow' : 'border-slate-800')}">
                     <div>
                         <div class="flex justify-between items-start gap-2">
                             <div class="max-w-[70%]">
-                                <span class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800"><i class="fa-solid ${catIconClass} text-[8px] shrink-0"></i><span class="uppercase tracking-wider">${spot.category || 'General'}</span><span class="text-slate-700 font-normal">•</span><span class="uppercase tracking-wider text-slate-500">${spot.city || 'Global'}</span></span>
+                                <span class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800 ${isDone ? 'opacity-40' : ''}"><i class="fa-solid ${catIconClass} text-[8px] shrink-0"></i><span class="uppercase tracking-wider">${spot.category || 'General'}</span><span class="text-slate-700 font-normal">•</span><span class="uppercase tracking-wider text-slate-500">${spot.city || 'Global'}</span></span>
                                 <h3 class="text-base font-bold ${isDone ? 'text-slate-500 line-through' : 'text-slate-200'} mt-1.5 truncate">${spot.spot_name}</h3>
                             </div>
                             <div class="flex items-stretch gap-1.5 shrink-0">
-                                <span id="weather-badge-${spot.rowid}" class="inline-flex items-center justify-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg min-w-[3.25rem] ${weatherBadgeClass}">${weatherBadgeInitHTML}</span>
-                                <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg h-fit ${!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400'}">${spot.distStr}</span>
+                                <span id="weather-badge-${spot.rowid}" class="inline-flex items-center justify-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg min-w-[3.25rem] ${weatherBadgeClass} ${isDone ? 'opacity-30' : ''}">${weatherBadgeInitHTML}</span>
+                                <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg h-fit ${isDone ? 'bg-slate-800/20 text-slate-600 opacity-40' : (!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400')}">${spot.distStr}</span>
                             </div>
                         </div>
                         <div class="mt-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60 min-h-[90px] overflow-hidden">
@@ -1490,18 +1694,18 @@ function renderList() {
                     </div>
                     <div class="flex flex-col gap-2 mt-3">
                         <div class="flex gap-2">
-                            <a href="${spot.instagram_url || '#'}" target="_blank" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3 rounded-xl text-white flex items-center justify-center shadow-lg">Open Reference</a>
-                            <button data-row-id="${spot.rowid}" onclick="handleAdaptiveDirectionClick(this, event)" class="px-4 flex items-center justify-center rounded-xl text-xs font-bold whitespace-nowrap h-12 ${!hasValidMapDestination ? 'bg-slate-950 border border-slate-800 text-amber-400 text-sm font-black w-14 shrink-0' : 'bg-slate-950 border border-slate-800 text-slate-300 flex-1'}">
-                                ${!hasValidMapDestination ? '<i class="fa-solid fa-triangle-exclamation"></i>' : '<i class="fa-solid fa-map mr-1.5 text-sm"></i> Directions'}
+                            <a href="${spot.instagram_url || '#'}" target="_blank" class="flex-1 text-center text-xs font-bold py-3 rounded-xl flex items-center justify-center ${isDone ? 'bg-slate-800/40 border border-slate-700/30 text-slate-600 opacity-40 pointer-events-none' : 'bg-gradient-to-r from-pink-600 to-purple-600 text-white shadow-lg'}">Open Reference</a>
+                            <button data-row-id="${spot.rowid}" onclick="handleAdaptiveDirectionClick(this, event)" class="px-4 flex items-center justify-center rounded-xl text-xs font-bold whitespace-nowrap h-12 ${isDone ? 'bg-slate-800/30 border border-slate-700/20 text-slate-600 flex-1 opacity-40 pointer-events-none' : (!hasValidMapDestination ? 'bg-slate-950 border border-slate-800 text-amber-400 text-sm font-black w-14 shrink-0' : 'bg-slate-950 border border-slate-800 text-slate-300 flex-1')}">
+                                ${isDone ? '<i class="fa-solid fa-map mr-1.5 text-sm"></i> Directions' : (!hasValidMapDestination ? '<i class="fa-solid fa-triangle-exclamation"></i>' : '<i class="fa-solid fa-map mr-1.5 text-sm"></i> Directions')}
                             </button>
                         </div>
-                        ${ticketLink.trim() !== "" ? `<a href="${ticketLink}" target="_blank" class="w-full mt-1 bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>` : ''}
+                        ${ticketLink.trim() !== "" && !isDone ? `<a href="${ticketLink}" target="_blank" class="w-full mt-1 bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>` : ''}
                         <div class="flex gap-2 mt-1 justify-end items-center">
-                            <button onclick="handleManualInlineCardFlipExecution(event, '${uniqueCardContainerId}', 'forward')" class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
+                            <button onclick="handleManualInlineCardFlipExecution(event, '${uniqueCardContainerId}', 'forward')" class="px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto ${isDone ? 'text-slate-600 bg-slate-950/50 border border-slate-800/30 opacity-40 pointer-events-none' : 'text-sky-400 bg-sky-500/10 border border-sky-500/20 active:bg-sky-500/20'}">
                                 <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
                             </button>
-                            <button onclick="updateCloudAction(${spot.rowid}, 'update_status', '${isDone ? 'Pending' : 'Done'}')" class="text-xs px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-bold active:bg-slate-855">${isDone ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo' : '<i class="fa-solid fa-check mr-1"></i> Mark Done'}</button>
-                            <button onclick="updateCloudAction(${spot.rowid}, 'toggle_priority', '${isHigh ? 'Normal' : 'Starred'}')" class="text-xs px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-amber-400">${isHigh ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star'}</button>
+                            <button onclick="updateCloudAction(${spot.rowid}, 'update_status', '${isDone ? 'Pending' : 'Done'}')" class="text-xs px-3 py-1.5 font-bold rounded-lg ${isDone ? 'bg-pink-600/10 border border-pink-600/20 text-pink-400 active:bg-pink-600/20' : 'bg-slate-950 border border-slate-800 text-slate-400 active:bg-slate-855'}">${isDone ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo' : '<i class="fa-solid fa-check mr-1"></i> Mark Done'}</button>
+                            <button onclick="updateCloudAction(${spot.rowid}, 'toggle_priority', '${isHigh ? 'Normal' : 'Starred'}')" class="text-xs px-2 py-1.5 rounded-lg ${isDone ? 'bg-slate-950/50 border border-slate-800/30 text-slate-600 opacity-40 pointer-events-none' : 'bg-slate-950 border border-slate-800 text-amber-400'}">${isHigh ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star'}</button>
                         </div>
                     </div>
                 </div>

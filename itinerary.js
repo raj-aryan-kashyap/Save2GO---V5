@@ -1,3 +1,11 @@
+// ── Dev / testing flags ───────────────────────────────────────────────────────
+// Set to true during development to lift production restrictions.
+// Must be false before shipping.
+
+/** When true, past dates are selectable in the itinerary calendar (useful for
+ *  building test itineraries with elapsed days to trigger the recalculate flow). */
+const DEV_ALLOW_PAST_DATE_SELECTION = false;
+
 // ── Itinerary state globals ──────────────────────────────────────────────────
 // All itinerary logic shares these; they are intentionally module-level so
 // every function in this file (and callers from aap.js / map.js) can read them.
@@ -15,29 +23,49 @@ let finalGeneratedSequenceRowIds = [null, null, null, null];
 let isEditingMode            = false;
 let editingItinId            = null;
 let pendingConfirmCallback   = null;
+let pendingCancelCallback    = null; // fired when thematic confirm is dismissed without confirming
+// Snapshot of prefilled field values when the rebuild drawer opens.
+// Used by validateItineraryForm to keep the Rebuild button disabled
+// until the user changes at least one field from the original config.
+let _itinEditSnapshot        = null;
 let itinShowStarredOnly      = JSON.parse(localStorage.getItem('compass_itin_starred_only')) || false;
 
 // Duration (minutes) and operating hours per category keyword.
 // Used by getCategoryLogic() when scheduling time slots.
+/**
+ * Return "YYYY-MM-DD" for today ± offsetDays using local calendar time.
+ * Always prefer this over toISOString() which can shift the date in timezones
+ * that are behind UTC.
+ * @param {number} [offsetDays=0]
+ * @returns {string}
+ */
+function _getLocalYMD(offsetDays = 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 const CATEGORY_DEFAULTS = {
+    // morningOnly: true  → skip for today if recalc fires after noon
+    // outdoor: true      → defer on days with rain/storm forecast
     'food':        { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 22 },
     'restaurant':  { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 22 },
-    'cafe':        { durationMax: 45,  durationRelaxed: 75,  open:  7, close: 21 },
-    'coffee':      { durationMax: 45,  durationRelaxed: 60,  open:  7, close: 20 },
+    'cafe':        { durationMax: 45,  durationRelaxed: 75,  open:  7, close: 21, morningOnly: true },
+    'coffee':      { durationMax: 45,  durationRelaxed: 60,  open:  7, close: 20, morningOnly: true },
     'attraction':  { durationMax: 90,  durationRelaxed: 120, open:  9, close: 18 },
-    'museum':      { durationMax: 90,  durationRelaxed: 120, open:  9, close: 17 },
+    'museum':      { durationMax: 90,  durationRelaxed: 120, open:  9, close: 17, morningOnly: true },
     'gallery':     { durationMax: 60,  durationRelaxed: 90,  open: 10, close: 18 },
     'shopping':    { durationMax: 60,  durationRelaxed: 90,  open: 10, close: 21 },
-    'market':      { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 20 },
-    'park':        { durationMax: 60,  durationRelaxed: 90,  open:  6, close: 20 },
-    'garden':      { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 18 },
-    'beach':       { durationMax: 120, durationRelaxed: 180, open:  6, close: 20 },
-    'nature':      { durationMax: 90,  durationRelaxed: 120, open:  6, close: 19 },
+    'market':      { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 20, morningOnly: true, outdoor: true },
+    'park':        { durationMax: 60,  durationRelaxed: 90,  open:  6, close: 20, outdoor: true },
+    'garden':      { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 18, morningOnly: true, outdoor: true },
+    'beach':       { durationMax: 120, durationRelaxed: 180, open:  6, close: 20, outdoor: true },
+    'nature':      { durationMax: 90,  durationRelaxed: 120, open:  6, close: 19, outdoor: true },
     'hotel':       { durationMax: 30,  durationRelaxed: 30,  open:  0, close: 24 },
     'bar':         { durationMax: 60,  durationRelaxed: 90,  open: 17, close: 24 },
     'nightlife':   { durationMax: 90,  durationRelaxed: 120, open: 20, close: 24 },
     'club':        { durationMax: 90,  durationRelaxed: 120, open: 21, close: 24 },
-    'sport':       { durationMax: 90,  durationRelaxed: 120, open:  8, close: 20 },
+    'sport':       { durationMax: 90,  durationRelaxed: 120, open:  8, close: 20, outdoor: true },
     'spa':         { durationMax: 90,  durationRelaxed: 120, open:  9, close: 20 },
     'default':     { durationMax: 60,  durationRelaxed: 90,  open:  9, close: 18 }
 };
@@ -218,11 +246,31 @@ function validateItineraryForm() {
 
     // ── All title rules pass — gate on remaining fields ───────────────────
     dupWarn.classList.add('hidden');
-    if (otherFieldsReady) {
-        _enable();
-    } else {
-        _disable();
+    if (!otherFieldsReady) { _disable(); return; }
+
+    // ── In edit/rebuild mode: require at least one changed field ──────────
+    if (isEditingMode && _itinEditSnapshot) {
+        const curTitle  = title;
+        const curCity   = document.getElementById('itin-new-city')?.value  || '';
+        const curStart  = document.getElementById('itin-new-start')?.value || '';
+        const curEnd    = document.getElementById('itin-new-end')?.value   || '';
+
+        const datesChanged = JSON.stringify([...selectedMultiDatesArray].sort()) !==
+                             JSON.stringify([..._itinEditSnapshot.dates].sort());
+        const catsChanged  = JSON.stringify(itinSelectedCategorySequence) !==
+                             JSON.stringify(_itinEditSnapshot.categories);
+
+        const isDirty = curTitle  !== _itinEditSnapshot.title  ||
+                        curCity   !== _itinEditSnapshot.city   ||
+                        itinPacingMode !== _itinEditSnapshot.pacing ||
+                        curStart  !== _itinEditSnapshot.start  ||
+                        curEnd    !== _itinEditSnapshot.end    ||
+                        datesChanged || catsChanged;
+
+        if (!isDirty) { _disable(); return; }
     }
+
+    _enable();
 }
 
 /**
@@ -342,20 +390,58 @@ function openEditItineraryModal(itinId) {
     if (!itin) return;
     isEditingMode = true;
     editingItinId = itinId;
+
+    // openItineraryCreationDrawerForm resets everything to "new" defaults first;
+    // we then override every field with the existing itinerary's values below.
     openItineraryCreationDrawerForm();
-    const nameEl = document.getElementById('itin-new-name');
+
+    // ── Pre-fill fields ──────────────────────────────────────────────────────
+    const nameEl  = document.getElementById('itin-new-name');
+    const startEl = document.getElementById('itin-new-start');
+    const endEl   = document.getElementById('itin-new-end');
+    const cityEl  = document.getElementById('itin-new-city');
+
     if (nameEl) nameEl.value = itin.title;
+
     if (itin.config) {
         selectedMultiDatesArray      = [...(itin.config.dates      || [])];
         itinSelectedCategorySequence = [...(itin.config.categories || [])];
         if (itin.config.pacing) setItinPacingMode(itin.config.pacing);
-        const startEl = document.getElementById('itin-new-start');
-        const endEl   = document.getElementById('itin-new-end');
-        if (startEl && itin.config.start != null) startEl.value = minutesToHHMM(itin.config.start);
-        if (endEl   && itin.config.end   != null) endEl.value   = minutesToHHMM(itin.config.end);
+        if (startEl) startEl.value = (itin.config.start != null) ? minutesToHHMM(itin.config.start) : '09:00';
+        if (endEl)   endEl.value   = (itin.config.end   != null) ? minutesToHHMM(itin.config.end)   : '21:00';
     }
+
+    // Pre-select city (the dropdown was just populated by openItineraryCreationDrawerForm)
+    if (cityEl && itin.city) cityEl.value = itin.city;
+
     updateMultiDateUILabel();
     renderItineraryFormCategoriesAndQueryRows();
+    _syncTimeDisplayButtons(); // update display buttons to match prefilled hidden inputs
+
+    // ── Snapshot all prefilled values ────────────────────────────────────────
+    // validateItineraryForm checks against this to keep Rebuild disabled until
+    // the user actually changes something.
+    _itinEditSnapshot = {
+        title:      nameEl  ? nameEl.value  : itin.title,
+        city:       cityEl  ? cityEl.value  : (itin.city || ''),
+        pacing:     itinPacingMode,
+        start:      startEl ? startEl.value : '',
+        end:        endEl   ? endEl.value   : '',
+        dates:      [...selectedMultiDatesArray],
+        categories: [...itinSelectedCategorySequence],
+    };
+
+    // ── Switch drawer chrome to "Rebuild" mode ───────────────────────────────
+    const titleEl  = document.getElementById('itinDrawerTitle');
+    const iconEl   = document.getElementById('itinDrawerTitleIcon');
+    const labelEl  = document.getElementById('itinDrawerSubmitLabel');
+    const iconBtn  = document.getElementById('itinDrawerSubmitIcon');
+    if (titleEl)  titleEl.textContent = `Rebuild your '${itin.title}'`;
+    if (iconEl)   iconEl.className    = 'fa-solid fa-wand-magic-sparkles';
+    if (labelEl)  labelEl.textContent = 'Rebuild';
+    if (iconBtn)  iconBtn.className   = 'fa-solid fa-wand-magic-sparkles mr-1.5';
+
+    // Start with Rebuild disabled — user must change at least one field
     validateItineraryForm();
 }
 
@@ -367,6 +453,278 @@ function openInlineUnscheduledSpotDrawer() {
     if (typeof showFormErrorSpeechBubble === 'function') {
         showFormErrorSpeechBubble(['Spot picker coming soon!']);
     }
+}
+
+// ── Custom Time Picker (Drum-Roll) ───────────────────────────────────────────
+// Replaces the OS-native <input type="time"> for the Daily Time Window field.
+// Hours: 12, 1–11 (12 h display).  Minutes: 00, 05 … 55 (5-min steps).
+// Internally stores and returns 24 h "HH:MM" strings (same format as before).
+//
+// Looping: hours and minutes drums are tripled so the user can scroll infinitely
+// in either direction without hitting a wall.  A boundary-jump silently
+// repositions the drum to the equivalent middle-copy position when the user
+// reaches the outer copies.  AM/PM has only 2 values so it does not loop.
+//
+// Pop animation: when the scroll settles (100 ms debounce), the newly-centred
+// item plays a short springy scale animation (drumItemPop keyframe in CSS).
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _activeTimePickerTarget = null; // 'start' | 'end'
+
+const _DRUM_HOURS   = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const _DRUM_MINUTES = ['00','05','10','15','20','25','30','35','40','45','50','55'];
+const _DRUM_PERIODS = ['AM','PM'];
+const _DRUM_ITEM_H  = 44; // px — must match CSS .itin-drum-item height
+const _DRUM_PAD     = 2;  // invisible spacer rows top + bottom
+
+/** Convert a 24 h "HH:MM" string into a human-friendly "HH:MM AM/PM" label. */
+function _fmtDisplayTime(hhmm) {
+    if (!hhmm || !hhmm.includes(':')) return hhmm || '';
+    const [h, m] = hhmm.split(':').map(Number);
+    const period = h < 12 ? 'AM' : 'PM';
+    const h12    = h % 12 || 12;
+    return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+/** Push both display buttons to match the current hidden-input values. */
+function _syncTimeDisplayButtons() {
+    const sVal = document.getElementById('itin-new-start')?.value || '09:00';
+    const eVal = document.getElementById('itin-new-end')?.value   || '21:00';
+    const sEl  = document.getElementById('itinStartTimeDisplay');
+    const eEl  = document.getElementById('itinEndTimeDisplay');
+    if (sEl) sEl.textContent = _fmtDisplayTime(sVal);
+    if (eEl) eEl.textContent = _fmtDisplayTime(eVal);
+}
+
+
+/**
+ * Build (or rebuild) a drum column.
+ *
+ * For drums with more than 2 values the content is tripled so the user can
+ * scroll infinitely in either direction.  A passive scroll listener watches
+ * for boundary crossings and silently jumps the scrollTop back to the
+ * equivalent position in the middle copy — visually seamless because all
+ * copies contain identical content.
+ *
+ * @param {string}  drumId   Element ID of the .itin-drum-scroll container
+ * @param {Array}   values   The display/data values for this drum
+ * @param {*}       selected The initially selected value
+ */
+function _buildDrum(drumId, values, selected) {
+    const drum = document.getElementById(drumId);
+    if (!drum) return;
+
+    // Abort any scroll listener attached by a previous _buildDrum call on this element
+    if (drum._scrollAbort) {
+        drum._scrollAbort.abort();
+        drum._scrollAbort = null;
+    }
+
+    drum.innerHTML = '';
+
+    const N      = values.length;
+    const loop   = N > 2;       // AM/PM (2 items) doesn't loop
+    const copies = loop ? 3 : 1;
+
+    // Store metadata so _readDrum and _highlightDrumCentre can normalise correctly
+    drum.dataset.setSize = N;
+    drum.dataset.loop    = loop ? '1' : '0';
+
+    const strSel = String(selected);
+    let selIdx   = values.findIndex(v => String(v) === strSel);
+    if (selIdx < 0) selIdx = 0;
+
+    // ── DOM: top pads ────────────────────────────────────────────────────────
+    for (let p = 0; p < _DRUM_PAD; p++) {
+        const pad = document.createElement('div');
+        pad.className = 'itin-drum-pad';
+        drum.appendChild(pad);
+    }
+
+    // ── DOM: items (1 or 3 copies) ───────────────────────────────────────────
+    for (let c = 0; c < copies; c++) {
+        values.forEach((v, i) => {
+            const item  = document.createElement('div');
+            const strV  = String(v);
+            item.className   = 'itin-drum-item';
+            item.textContent = isNaN(v) ? strV : strV.padStart(2, '0');
+            item.dataset.value = strV;
+
+            // Tap → smooth scroll to the matching item in the MIDDLE copy
+            item.addEventListener('click', () => {
+                const midOffset = loop ? N : 0;
+                drum.scrollTo({ top: (midOffset + i) * _DRUM_ITEM_H, behavior: 'smooth' });
+            });
+
+            drum.appendChild(item);
+        });
+    }
+
+    // ── DOM: bottom pads ─────────────────────────────────────────────────────
+    for (let p = 0; p < _DRUM_PAD; p++) {
+        const pad = document.createElement('div');
+        pad.className = 'itin-drum-pad';
+        drum.appendChild(pad);
+    }
+
+    // ── Initial scroll position ───────────────────────────────────────────────
+    // For looping drums, start in the middle copy so the user can scroll either way.
+    // scrollTop formula: (copy_index * N + item_index) * ITEM_HEIGHT
+    // Middle copy = copy index 1 → midOffset = N
+    const midOffset    = loop ? N : 0;
+    drum.scrollTop     = (midOffset + selIdx) * _DRUM_ITEM_H;
+
+    // Highlight the selected item immediately (no pop animation on open)
+    _highlightDrumCentre(drum, false);
+
+    // ── Scroll listener ───────────────────────────────────────────────────────
+    let _debounceTimer;
+    const abortCtrl = new AbortController();
+    drum._scrollAbort = abortCtrl;
+
+    drum.addEventListener('scroll', () => {
+        // Boundary jump — keep the drum in the middle-copy range
+        if (loop) {
+            const setH = N * _DRUM_ITEM_H;
+            if (drum.scrollTop < setH) {
+                drum.scrollTop += setH;  // jumped: next scroll event re-runs highlight
+                return;
+            }
+            if (drum.scrollTop >= 2 * setH) {
+                drum.scrollTop -= setH;
+                return;
+            }
+        }
+
+        // Live colour update during drag (no pop animation yet)
+        _highlightDrumCentre(drum, false);
+
+        // Pop animation fires only after the scroll settles
+        clearTimeout(_debounceTimer);
+        _debounceTimer = setTimeout(() => _highlightDrumCentre(drum, true), 100);
+    }, { passive: true, signal: abortCtrl.signal });
+}
+
+/**
+ * Update the --active class on the item currently snapped to centre.
+ * If playPop is true and the active item has changed, play the springy
+ * drumItemPop animation on the incoming item.
+ *
+ * The scroll position encodes the absolute item index directly
+ * (scrollTop / ITEM_HEIGHT = absolute index across all copies).
+ * For looping drums the index is always in [N, 2N) after boundary jumps.
+ *
+ * @param {HTMLElement} drum
+ * @param {boolean}     playPop  Play the springy animation when active changes
+ */
+function _highlightDrumCentre(drum, playPop = false) {
+    const absIdx = Math.round(drum.scrollTop / _DRUM_ITEM_H);
+    const items  = drum.querySelectorAll('.itin-drum-item');
+
+    items.forEach((el, i) => {
+        const isActive  = (i === absIdx);
+        const wasActive = el.classList.contains('itin-drum-item--active');
+
+        if (isActive && !wasActive) {
+            el.classList.add('itin-drum-item--active');
+            if (playPop) {
+                // Restart animation if it's already running (rapid scroll)
+                el.classList.remove('drum-pop');
+                void el.offsetWidth; // force reflow to restart keyframe
+                el.classList.add('drum-pop');
+                el.addEventListener('animationend', () => el.classList.remove('drum-pop'), { once: true });
+            }
+        } else if (!isActive && wasActive) {
+            el.classList.remove('itin-drum-item--active', 'drum-pop');
+        }
+    });
+}
+
+/**
+ * Read the value of the item currently centred in a drum column.
+ * Uses the absolute scroll index (works for both looping and non-looping drums).
+ */
+function _readDrum(drumId) {
+    const drum = document.getElementById(drumId);
+    if (!drum) return null;
+    const absIdx = Math.round(drum.scrollTop / _DRUM_ITEM_H);
+    const items  = drum.querySelectorAll('.itin-drum-item');
+    return items[absIdx]?.dataset.value ?? null;
+}
+
+/**
+ * Open the themed drum-roll time picker.
+ * The drums pre-select the value currently stored in the hidden input.
+ * Defaults are 09:00 for start and 21:00 for end, set by openItineraryCreationDrawerForm.
+ *
+ * @param {'start'|'end'} target  Which hidden input to update on confirm.
+ */
+function openCustomTimePicker(target) {
+    _activeTimePickerTarget = target;
+
+    const inputId = target === 'start' ? 'itin-new-start' : 'itin-new-end';
+    const rawVal  = document.getElementById(inputId)?.value
+                    || (target === 'start' ? '09:00' : '21:00');
+
+    // Parse 24 h value → 12 h display components
+    const [hRaw, mRaw] = rawVal.split(':').map(Number);
+    const period  = hRaw < 12 ? 'AM' : 'PM';
+    const hour12  = hRaw % 12 || 12;
+    const minSel  = _DRUM_MINUTES[Math.min(Math.round(mRaw / 5), _DRUM_MINUTES.length - 1)];
+
+    // Update modal title
+    const titleEl = document.getElementById('customTimePickerTitle');
+    if (titleEl) titleEl.textContent = target === 'start' ? 'Day Start Time' : 'Day End Time';
+
+    // ── Show the modal BEFORE building drums ─────────────────────────────────
+    // scrollTop assignments on display:none elements are discarded by browsers.
+    // The element must be visible and have real layout before we set scrollTop.
+    document.getElementById('customTimePickerModal').classList.remove('hidden');
+
+    // Build drums now that the container has layout
+    _buildDrum('timeDrumHour',   _DRUM_HOURS,   hour12);
+    _buildDrum('timeDrumMinute', _DRUM_MINUTES, minSel);
+    _buildDrum('timeDrumPeriod', _DRUM_PERIODS, period);
+
+    // Re-highlight after one frame to ensure the browser has committed layout
+    // (scroll-snap can shift scrollTop slightly on first paint)
+    requestAnimationFrame(() => {
+        ['timeDrumHour', 'timeDrumMinute', 'timeDrumPeriod'].forEach(id => {
+            const d = document.getElementById(id);
+            if (d) _highlightDrumCentre(d, false);
+        });
+    });
+}
+
+/** Read the three drums, convert to 24 h, persist to hidden input, update display. */
+function confirmCustomTimePicker() {
+    const h      = _readDrum('timeDrumHour');
+    const m      = _readDrum('timeDrumMinute');
+    const period = _readDrum('timeDrumPeriod');
+
+    if (!h || !m || !period) { closeCustomTimePicker(); return; }
+
+    let hour24 = parseInt(h, 10);
+    if (period === 'AM' && hour24 === 12) hour24 = 0;
+    if (period === 'PM' && hour24 !== 12) hour24 += 12;
+
+    const timeStr = `${String(hour24).padStart(2, '0')}:${m}`;
+
+    const inputId = _activeTimePickerTarget === 'start' ? 'itin-new-start' : 'itin-new-end';
+    const input   = document.getElementById(inputId);
+    if (input) input.value = timeStr;
+
+    const dispId = _activeTimePickerTarget === 'start' ? 'itinStartTimeDisplay' : 'itinEndTimeDisplay';
+    const dispEl = document.getElementById(dispId);
+    if (dispEl) dispEl.textContent = _fmtDisplayTime(timeStr);
+
+    closeCustomTimePicker();
+    validateItineraryForm();
+}
+
+function closeCustomTimePicker() {
+    document.getElementById('customTimePickerModal')?.classList.add('hidden');
+    _activeTimePickerTarget = null;
 }
 
 // ── End of globals / stubs block ─────────────────────────────────────────────
@@ -533,11 +891,30 @@ function saveGeneratedWizardSequenceToActiveDay() {
 function toggleItineraryCreationDrawerForm(show) {
     const modal = document.getElementById('itineraryCreationDrawerModal');
     if (modal) modal.classList.toggle('hidden', !show);
+    // When the drawer is cancelled (X button) while in edit mode, the user arrived
+    // here from the burger menu — reopen the menu so they don't lose navigation context.
+    // Note: generateIntelligentItinerary sets isEditingMode = false *before* calling
+    // this function, so the reopen only fires on genuine cancellations, not successful rebuilds.
+    if (!show && isEditingMode) {
+        openItinDetailMenuDrawer();
+    }
 }
 
 function openItineraryCreationDrawerForm() {
     toggleItineraryCreationDrawerForm(true);
     resetItineraryTitleValidationUI();
+    _itinEditSnapshot = null;  // cleared here; openEditItineraryModal sets it after prefilling
+
+    // Reset drawer chrome to "new" mode — openEditItineraryModal overrides these
+    const _titleEl  = document.getElementById('itinDrawerTitle');
+    const _iconEl   = document.getElementById('itinDrawerTitleIcon');
+    const _labelEl  = document.getElementById('itinDrawerSubmitLabel');
+    const _iconBtn  = document.getElementById('itinDrawerSubmitIcon');
+    if (_titleEl)  _titleEl.textContent = 'Build Your Itinerary';
+    if (_iconEl)   _iconEl.className    = 'fa-solid fa-route';
+    if (_labelEl)  _labelEl.textContent = 'Build Itinerary';
+    if (_iconBtn)  _iconBtn.className   = 'fa-solid fa-wand-magic-sparkles mr-1.5';
+
     itinSelectedCategorySequence = [];
     
     let defaultFoodCategory = 'Food Spot'; 
@@ -567,6 +944,13 @@ function openItineraryCreationDrawerForm() {
     
     updateMultiDateUILabel();
     renderItineraryFormCategoriesAndQueryRows();
+
+    // Reset time fields to fixed defaults: 09:00 AM start, 09:00 PM end.
+    const _startEl = document.getElementById('itin-new-start');
+    const _endEl   = document.getElementById('itin-new-end');
+    if (_startEl) _startEl.value = '09:00';
+    if (_endEl)   _endEl.value   = '21:00';
+    _syncTimeDisplayButtons();
 }
 
 function setItinPacingMode(mode) {
@@ -583,6 +967,19 @@ function setItinPacingMode(mode) {
 }
 
 function openMultiDatePickerModal() {
+    // For a new itinerary always open on the current calendar month.
+    // For Rebuild, jump to the month of the earliest already-selected date
+    // so the user immediately sees their existing selection.
+    if (isEditingMode && selectedMultiDatesArray.length > 0) {
+        const firstDate = [...selectedMultiDatesArray].sort()[0];
+        const parts = firstDate.split('-').map(Number);
+        calYear  = parts[0];
+        calMonth = parts[1] - 1;
+    } else {
+        const now = new Date();
+        calMonth = now.getMonth();
+        calYear  = now.getFullYear();
+    }
     document.getElementById('itinCalendarModal').classList.remove('hidden');
     renderMultiDateCalendarGrid();
 }
@@ -595,24 +992,63 @@ function changeMultiCalendarMonth(offset) {
 }
 
 function renderMultiDateCalendarGrid() {
-    const grid = document.getElementById('calendarDaysGrid');
+    const grid  = document.getElementById('calendarDaysGrid');
     const title = document.getElementById('calendarMonthTitle');
     if (!grid) return;
-    grid.innerHTML = ''; 
-    title.innerText = `${["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][calMonth]} ${calYear}`;
+    grid.innerHTML = '';
+    title.innerText = `${["January","February","March","April","May","June","July","August","September","October","November","December"][calMonth]} ${calYear}`;
 
+    // Build today's YYYY-MM-DD string using local time (no UTC offset issues)
+    const _now = new Date();
+    const todayStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
+
+    // Leading empty cells to align the first day of the month
     for (let i = 0; i < new Date(calYear, calMonth, 1).getDay(); i++) {
         grid.innerHTML += `<div></div>`;
     }
 
     for (let i = 1; i <= new Date(calYear, calMonth + 1, 0).getDate(); i++) {
-        let dateStr = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
-        let isSelected = selectedMultiDatesArray.includes(dateStr);
-        let btnClass = isSelected 
-            ? "w-8 h-8 rounded-full bg-pink-600 text-white font-bold text-xs flex items-center justify-center mx-auto shadow-lg shadow-pink-600/30 transform scale-110 transition-transform" 
-            : "w-8 h-8 rounded-full bg-slate-900 text-slate-300 font-medium text-xs flex items-center justify-center mx-auto border border-slate-800 hover:bg-slate-800 hover:text-white cursor-pointer transition-colors";
-        
-        grid.innerHTML += `<div onclick="toggleMultiDateSelection('${dateStr}')" class="${btnClass}">${i}</div>`;
+        const dateStr    = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+        const isSelected = selectedMultiDatesArray.includes(dateStr);
+        const isToday    = dateStr === todayStr;
+        const isPast     = !DEV_ALLOW_PAST_DATE_SELECTION && dateStr < todayStr;
+
+        let btnClass;
+        let onclickAttr;
+        if (isPast) {
+            // Elapsed date: visually disabled, not interactive
+            btnClass    = "w-8 h-8 rounded-full text-slate-700 font-medium text-xs flex items-center justify-center mx-auto border border-slate-800/40 cursor-not-allowed select-none opacity-35 line-through decoration-slate-700";
+            onclickAttr = '';
+        } else if (isSelected) {
+            // Selected: solid pink fill
+            btnClass    = "w-8 h-8 rounded-full bg-pink-600 text-white font-bold text-xs flex items-center justify-center mx-auto shadow-lg shadow-pink-600/30 transform scale-110 transition-transform cursor-pointer";
+            onclickAttr = `onclick="toggleMultiDateSelection('${dateStr}')"`;
+        } else if (isToday) {
+            // Today (not selected): dotted ring indicator
+            btnClass    = "w-8 h-8 rounded-full text-pink-300 font-bold text-xs flex items-center justify-center mx-auto border-2 border-dashed border-pink-500/60 cursor-pointer transition-colors hover:bg-slate-800";
+            onclickAttr = `onclick="toggleMultiDateSelection('${dateStr}')"`;
+        } else {
+            // Future day
+            btnClass    = "w-8 h-8 rounded-full bg-slate-900 text-slate-300 font-medium text-xs flex items-center justify-center mx-auto border border-slate-800 hover:bg-slate-800 hover:text-white cursor-pointer transition-colors";
+            onclickAttr = `onclick="toggleMultiDateSelection('${dateStr}')"`;
+        }
+
+        grid.innerHTML += `<div ${onclickAttr} class="${btnClass}">${i}</div>`;
+    }
+
+    // Enable / disable action buttons based on whether any dates are selected
+    const hasSelection = selectedMultiDatesArray.length > 0;
+    const resetBtn   = document.getElementById('calResetBtn');
+    const confirmBtn = document.getElementById('calConfirmBtn');
+    if (resetBtn) {
+        resetBtn.disabled = !hasSelection;
+        resetBtn.classList.toggle('opacity-40',          !hasSelection);
+        resetBtn.classList.toggle('pointer-events-none', !hasSelection);
+    }
+    if (confirmBtn) {
+        confirmBtn.disabled = !hasSelection;
+        confirmBtn.classList.toggle('opacity-40',          !hasSelection);
+        confirmBtn.classList.toggle('pointer-events-none', !hasSelection);
     }
 }
 
@@ -623,6 +1059,15 @@ function toggleMultiDateSelection(dateStr) {
         selectedMultiDatesArray.push(dateStr);
     }
     renderMultiDateCalendarGrid();
+    // Re-evaluate the Build / Rebuild button whenever the date selection changes
+    validateItineraryForm();
+}
+
+/** Clear all selected dates, re-render the grid and re-validate the form. */
+function resetMultiDateSelection() {
+    selectedMultiDatesArray = [];
+    renderMultiDateCalendarGrid();
+    validateItineraryForm();
 }
 
 function checkSequentialDates(dates) {
@@ -640,6 +1085,8 @@ function checkSequentialDates(dates) {
 function closeMultiDatePickerModal() {
     document.getElementById('itinCalendarModal').classList.add('hidden');
     updateMultiDateUILabel();
+    // Re-evaluate Build / Rebuild button now that the selection is confirmed
+    validateItineraryForm();
 }
 
 function updateMultiDateUILabel() {
@@ -766,13 +1213,13 @@ function compileItineraryFromSequencePatternForm() {
     alert(`Surgically compiled matrix track sequence pattern mapping. Injected ${calculatedTrackIds.length} path targets.`);
 }
 
-function openThematicConfirm(title, desc, confirmText, callback, theme = 'pink') {
+function openThematicConfirm(title, desc, confirmText, callback, theme = 'pink', cancelCb = null) {
     document.getElementById('thematicConfirmTitle').innerText = title;
     document.getElementById('thematicConfirmDesc').innerText = desc;
     const btn = document.getElementById('thematicConfirmActionBtn');
     const icon = document.getElementById('thematicConfirmIcon');
     btn.innerText = confirmText;
-    
+
     if (theme === 'pink') {
         btn.className = "w-full max-w-[200px] py-3.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-pink-600/20 active:scale-95 transition-transform";
         icon.className = "w-16 h-16 rounded-full bg-pink-500/10 flex items-center justify-center text-pink-500 text-2xl mx-auto mb-2 border border-pink-500/20";
@@ -784,6 +1231,7 @@ function openThematicConfirm(title, desc, confirmText, callback, theme = 'pink')
     }
 
     pendingConfirmCallback = callback;
+    pendingCancelCallback  = cancelCb; // stored separately; cleared on confirm so it only fires on dismiss
     const modal = document.getElementById('thematicConfirmModal');
     const box = document.getElementById('thematicConfirmBox');
     modal.classList.remove('hidden');
@@ -800,21 +1248,33 @@ function closeThematicConfirm() {
     box.classList.remove('scale-100'); box.classList.add('scale-95');
     setTimeout(() => modal.classList.add('hidden'), 300);
     pendingConfirmCallback = null;
+    // Fire cancel callback (e.g. reopen burger menu) when dismissed without confirming.
+    // The confirm button path clears this before calling closeThematicConfirm, so it
+    // only fires on backdrop-tap / X-close / programmatic cancel.
+    if (pendingCancelCallback) { pendingCancelCallback(); pendingCancelCallback = null; }
 }
 
 document.getElementById('thematicConfirmActionBtn').addEventListener('click', () => {
     if (pendingConfirmCallback) pendingConfirmCallback();
+    pendingCancelCallback = null; // confirmed — don't fire cancel
     closeThematicConfirm();
 });
 
 function promptDeleteItinerary() {
-    openThematicConfirm("Delete Itinerary", "Are you sure you want to delete this specific itinerary?", "Delete", () => {
-        savedItineraries = savedItineraries.filter(i => i.id !== activeItineraryId);
-        localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
-        syncItineraryToCloud({id: activeItineraryId}, 'delete');
-        activeItineraryId = null;
-        closeItineraryDetailView();
-    }, 'red');
+    openThematicConfirm(
+        "Delete Itinerary",
+        "Are you sure you want to delete this specific itinerary?",
+        "Delete",
+        () => {
+            savedItineraries = savedItineraries.filter(i => i.id !== activeItineraryId);
+            localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+            syncItineraryToCloud({id: activeItineraryId}, 'delete');
+            activeItineraryId = null;
+            closeItineraryDetailView();
+        },
+        'red',
+        () => openItinDetailMenuDrawer() // cancelled → return to burger menu
+    );
 }
 
 /**
@@ -838,8 +1298,90 @@ function toggleItineraryStar(itinId) {
         // Just update the star icon in the header — leave everything else alone
         _syncDetailViewStarBtn(itin);
     } else {
-        renderItineraryMasterDashboardWorkspace();
+        _renderItineraryMasterAnimated(itinId, itin.starred);
     }
+}
+
+/**
+ * Animated re-render of the itinerary master list after a star toggle.
+ * Mirrors the renderListAnimated FLIP engine used by the Saved Spots list:
+ *   • Starring   → amber burst in-place, then FLIP slide to top
+ *   • Unstarring → FLIP slide to new position (no burst, motion is enough)
+ */
+function _renderItineraryMasterAnimated(itinId, isStarringAction) {
+    const masterList = document.getElementById('itineraryMasterListScroll');
+    if (!masterList) { renderItineraryMasterDashboardWorkspace(); return; }
+
+    // Query only the data cards — ignore footer / empty-state / filter-msg nodes
+    const getCards = () => [...masterList.querySelectorAll('[id^="itin-master-card-"]')];
+
+    // Inner FLIP helper — snapshots positions, rebuilds, then animates each card
+    // from its old screen position to its new one.
+    // skipFlash=true when the burst already played in-place so it doesn't fire again.
+    function _doFlip(skipFlash) {
+        const snapBefore = new Map();
+        getCards().forEach(el => snapBefore.set(el.id, el.getBoundingClientRect().top));
+
+        renderItineraryMasterDashboardWorkspace(); // synchronous rebuild (starred now on top)
+
+        requestAnimationFrame(() => {
+            const entries = getCards().map(el => ({
+                el,
+                newTop: el.getBoundingClientRect().top,
+            }));
+
+            // Batch writes — displace each card back to its pre-render screen position
+            entries.forEach(({ el, newTop }) => {
+                const oldTop = snapBefore.get(el.id);
+                if (oldTop !== undefined) {
+                    const deltaY = oldTop - newTop;
+                    if (Math.abs(deltaY) > 1) {
+                        el.style.transition = 'none';
+                        el.style.transform  = `translateY(${deltaY}px)`;
+                        el.dataset.animMove = '1';
+                    }
+                } else {
+                    // Newly visible card (shouldn't normally happen here, safety net)
+                    el.style.opacity    = '0';
+                    el.dataset.animFade = '1';
+                }
+            });
+
+            void entries[0]?.el.offsetHeight; // force layout so transforms are registered
+
+            requestAnimationFrame(() => {
+                const EASE = 'cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                entries.forEach(({ el }) => {
+                    if (el.dataset.animMove) {
+                        el.style.transition = `transform 0.42s ${EASE}`;
+                        el.style.transform  = 'translateY(0)';
+                        delete el.dataset.animMove;
+                    } else if (el.dataset.animFade) {
+                        el.style.transition = 'opacity 0.32s ease';
+                        el.style.opacity    = '1';
+                        delete el.dataset.animFade;
+                    }
+                });
+            });
+        });
+    }
+
+    // ── Starring: flash at current position THEN slide to top ────────────────
+    if (isStarringAction) {
+        const cardEl = document.getElementById(`itin-master-card-${itinId}`);
+        if (cardEl) {
+            cardEl.classList.add('card-flash-star');
+            cardEl.addEventListener('animationend', () => {
+                cardEl.classList.remove('card-flash-star');
+                _doFlip(true); // flash already played — skip second burst
+            }, { once: true });
+            return;
+        }
+        // Card not in DOM — fall through to immediate reorder
+    }
+
+    // ── Unstarring (or card not found): FLIP reorder directly ────────────────
+    _doFlip(false);
 }
 
 /** Syncs the star button icon/colour in the expanded detail view header. */
@@ -902,8 +1444,19 @@ function renderItineraryMasterDashboardWorkspace() {
         if (el.id !== 'itineraryEmptyStateLanding') el.remove();
     });
 
+    // Sort order: starred → normal → fully-completed (bottom)
+    // Mirrors the Saved Spots list: priority items at top, done items at bottom.
+    const _itinSortKey = i => {
+        const _allSpots = i.days.flatMap(d => d.timeline || []);
+        const _isDone   = _allSpots.length > 0 && _allSpots.every(s => s.isDone);
+        if (_isDone)      return 2; // completed — bottom
+        if (i.starred)    return 0; // starred   — top
+        return 1;                   // normal    — middle
+    };
+    const _sortedItineraries = [...savedItineraries].sort((a, b) => _itinSortKey(a) - _itinSortKey(b));
+
     let visibleCount = 0;
-    savedItineraries.forEach(itin => {
+    _sortedItineraries.forEach(itin => {
         // ── Master list filters ───────────────────────────────────────────────
         if (itinShowStarredOnly && !itin.starred) return;
         if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(itin.city)) {
@@ -915,6 +1468,11 @@ function renderItineraryMasterDashboardWorkspace() {
         let totalCount = 0;
         itin.days.forEach(d => d.timeline.forEach(s => { totalCount++; if (s.isDone) doneCount++; }));
         const allDone    = totalCount > 0 && doneCount === totalCount;
+
+        // Remaining days = real (non-suggested) days whose date is today or in the future
+        const _todayYMD      = _getLocalYMD(0);
+        const _remainingDays = itin.days.filter(d => d && !d.isSuggested && d.date && d.date >= _todayYMD).length;
+        const _dayPillLabel  = `${_remainingDays} Day${_remainingDays !== 1 ? 's' : ''} Remaining`;
         const coverageColor = allDone ? 'text-emerald-400' : 'text-slate-300';
         const coverageIcon  = allDone
             ? '<i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i>'
@@ -922,11 +1480,18 @@ function renderItineraryMasterDashboardWorkspace() {
         const isStarred = !!itin.starred;
 
         const card = document.createElement('div');
-        card.className = "bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col gap-2 cursor-pointer active:scale-[0.98] transition-transform shadow-lg";
+        card.id = `itin-master-card-${itin.id}`;
+        // Completed itineraries get a greyed-out look; starred get the gold glow;
+        // normal cards get the default slate border.
+        const _cardBorderCls = allDone ? 'border-slate-800 opacity-50 grayscale' : (isStarred ? 'starred-gold-glow' : 'border-slate-800');
+        card.className = `itin-master-card bg-slate-900 border rounded-2xl p-4 flex flex-col gap-2 cursor-pointer active:scale-[0.98] transition-transform shadow-lg ${_cardBorderCls}`;
         card.onclick = () => openItineraryDetailView(itin.id);
+        // Text nodes inside a completed card get strikethrough + muted colour
+        const _titleCls = allDone ? 'line-through text-slate-500' : 'text-slate-200';
+        const _cityCls  = allDone ? 'line-through text-slate-600' : 'text-slate-500';
         card.innerHTML = `
             <div class="flex justify-between items-start">
-                <h3 class="text-sm font-black text-slate-200 flex-1 min-w-0 pr-2 flex items-center gap-1.5">
+                <h3 class="text-sm font-black ${_titleCls} flex-1 min-w-0 pr-2 flex items-center gap-1.5">
                     <i class="fa-solid ${itin.config?.pacing === 'relaxed' ? 'fa-mug-hot text-sky-400' : 'fa-rocket text-amber-400'} text-[10px] shrink-0"></i>
                     <span class="truncate">${itin.title}</span>
                 </h3>
@@ -935,10 +1500,10 @@ function renderItineraryMasterDashboardWorkspace() {
                             class="w-6 h-6 flex items-center justify-center transition-colors active:scale-90">
                         <i class="fa-${isStarred ? 'solid' : 'regular'} fa-star text-sm ${isStarred ? 'text-amber-400' : 'text-slate-600'}"></i>
                     </button>
-                    <span class="text-[9px] font-bold px-2 py-1 bg-slate-800 border border-slate-700 rounded-md text-slate-400 shadow-inner">${itin.days.length} Day${itin.days.length !== 1 ? 's' : ''}</span>
+                    <span class="text-[9px] font-bold px-2 py-1 bg-slate-800 border border-slate-700 rounded-md text-slate-400 shadow-inner">${_dayPillLabel}</span>
                 </div>
             </div>
-            <div class="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+            <div class="flex items-center gap-1.5 text-[10px] ${_cityCls} font-bold uppercase tracking-wider">
                 <i class="fa-solid fa-location-dot text-pink-500"></i> ${itin.city}
             </div>
             <div class="mt-1 overflow-hidden rounded-lg bg-slate-950/60 border border-slate-800/60" style="height:22px">
@@ -1244,6 +1809,35 @@ async function _populateItinActivityWeatherBadge(badgeId, city, dateStr, dayInde
     el.innerHTML = `<i class="fa-solid ${match.iconClass} text-[8px]"></i>${temp ? `<span>${temp}</span>` : ''}`;
 }
 
+/**
+ * Asynchronously shows or hides the rain-risk badge for a single activity card.
+ *
+ * Works independently of the recalculate engine — the badge appears as soon as
+ * the forecast is available (even on freshly-created itineraries) by fetching
+ * weather data into the warm cache, then re-evaluating whether the day is rainy
+ * AND the spot's category is marked as outdoor.
+ *
+ * @param {string} badgeId   — the DOM id of the rain-risk <span> element
+ * @param {string} city      — itinerary city (used for forecast lookup)
+ * @param {string} dateYMD   — YYYY-MM-DD date of the day being displayed
+ * @param {string} category  — spot category string (matched via getCategoryLogic)
+ * @param {boolean} isDone   — done spots never show the badge
+ */
+async function _updateRainRiskBadge(badgeId, city, dateYMD, category, isDone) {
+    if (isDone) return;
+    const el = document.getElementById(badgeId);
+    if (!el) return;
+
+    // Warm up the cache if needed (no-op when already cached within TTL)
+    if (city) {
+        await fetchItineraryForecast(city);
+    }
+
+    const hasRain   = _dayHasRain(city, dateYMD);
+    const isOutdoor = getCategoryLogic(category).outdoor;
+    el.classList.toggle('hidden', !(hasRain && isOutdoor));
+}
+
 // ── Open map-style info tray from the itinerary expanded view ─────────────────
 /**
  * Opens the standard mapDetailTrayHUD populated with the given spot's data,
@@ -1299,7 +1893,19 @@ function openSpotTrayFromItinerary(spotObj) {
 
 function openItineraryDetailView(itinId) {
     activeItineraryId = itinId;
+
+    // Default to Day 1 (index 0), then try to advance to the current active day.
+    // "Active day" = the first real (non-suggested) day whose date >= today.
+    // This means if Day 1 is yesterday and Day 2 is today, the view opens on Day 2.
+    // If the itinerary is entirely in the past, or has no dated days, stay on Day 1.
     activeItineraryDayTracker = 0;
+    const _itin    = savedItineraries.find(i => i.id === itinId);
+    const _todayYMD = _getLocalYMD(0);
+    if (_itin?.days) {
+        const _smartIdx = _itin.days.findIndex(d => d && !d.isSuggested && d.date && d.date >= _todayYMD);
+        if (_smartIdx !== -1) activeItineraryDayTracker = _smartIdx;
+    }
+
     document.getElementById('itineraryMasterListView').classList.add('hidden');
     document.getElementById('itineraryDetailView').classList.remove('hidden');
     renderDetailViewTimeline();
@@ -1311,6 +1917,62 @@ function closeItineraryDetailView() {
     renderItineraryMasterDashboardWorkspace();
 }
 
+/**
+ * Returns true when the recalculate engine would have something to act on:
+ *   1. At least one real (non-suggested) day whose calendar date is in the past.
+ *   2. AND at least one of the following is true:
+ *        a. A past day has an undone, non-anchored, non-skipped activity
+ *           (something to lift and reschedule).
+ *        b. Any activity anywhere is marked Done
+ *           (trip is in-progress; confidence + re-sorting is still useful).
+ */
+function _hasRecalculatableItems() {
+    const itin = getActiveItinerary();
+    if (!itin) return false;
+    const todayYMD = _getLocalYMD(0);
+
+    // Condition 1: at least one real elapsed past day
+    const elapsedDays = itin.days.filter(d => d && !d.isSuggested && d.date && d.date < todayYMD);
+    if (elapsedDays.length === 0) return false;
+
+    // Condition 2a: a past day has at least one pending (liftable) activity
+    const hasPendingOnPastDay = elapsedDays.some(day =>
+        day.timeline?.some(s => !s.isDone && !s.isAnchored && !s.isSkipped)
+    );
+    if (hasPendingOnPastDay) return true;
+
+    // Condition 2b: any Done item exists anywhere (trip in-progress, re-sorting valid)
+    return itin.days.some(day => day?.timeline?.some(s => s.isDone));
+}
+
+/** Opens the ☰ action bottom-sheet for the expanded timeline header. */
+function openItinDetailMenuDrawer() {
+    const drawer = document.getElementById('itinDetailMenuDrawer');
+    if (!drawer) return;
+
+    // Context-aware Recalculate button: enabled only when the itinerary has at
+    // least one elapsed past day AND at least one Done activity to act on.
+    const recalcBtn = document.getElementById('itinBurgerRecalcBtn');
+    if (recalcBtn) {
+        const canRecalc = _hasRecalculatableItems();
+        recalcBtn.disabled = !canRecalc;
+        recalcBtn.classList.toggle('opacity-40',        !canRecalc);
+        recalcBtn.classList.toggle('pointer-events-none', !canRecalc);
+        // Replace amber with muted slate when disabled so it reads as inactive
+        recalcBtn.classList.toggle('bg-amber-500/10',    canRecalc);
+        recalcBtn.classList.toggle('border-amber-500/20', canRecalc);
+        recalcBtn.classList.toggle('bg-slate-800/30',    !canRecalc);
+        recalcBtn.classList.toggle('border-slate-700/20', !canRecalc);
+    }
+
+    drawer.classList.remove('hidden');
+}
+
+/** Closes the ☰ action bottom-sheet. */
+function closeItinDetailMenuDrawer() {
+    document.getElementById('itinDetailMenuDrawer')?.classList.add('hidden');
+}
+
 function navigateItineraryDay(offset) {
     const itin = getActiveItinerary();
     if(!itin) return;
@@ -1320,10 +1982,270 @@ function navigateItineraryDay(offset) {
     renderDetailViewTimeline();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Suggested extra-days persistent banner
+// Stored on itin._suggestedBanner = { active, count } so it survives refresh /
+// device switch via the existing localStorage + cloud sync path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the styled suggested-days banner element that floats above the first
+ * activity card in the timeline.  Matches the app's dark-slate art style.
+ */
+function _createSuggestedTimelineBanner(itin) {
+    const count = itin._suggestedBanner?.count || 1;
+    const noun  = count === 1 ? 'day' : 'days';
+    const wrap  = document.createElement('div');
+    wrap.className = 'suggested-timeline-banner suggested-banner-float';
+    wrap.style.cssText = 'margin: 0 16px 20px; padding-top: 12px;';
+
+    wrap.innerHTML = `
+        <div style="
+            background: linear-gradient(135deg, rgba(236,72,153,0.07) 0%, rgba(15,23,42,0.95) 100%);
+            border: 1px solid rgba(236,72,153,0.22);
+            border-radius: 18px;
+            padding: 14px;
+            box-shadow: 0 8px 28px rgba(0,0,0,0.30), 0 0 0 1px rgba(236,72,153,0.05) inset;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        ">
+            <!-- Header row: icon · title · dismiss X -->
+            <div style="display:flex;align-items:center;gap:10px;">
+                <div style="
+                    width:34px;height:34px;border-radius:11px;flex-shrink:0;
+                    background:rgba(236,72,153,0.10);border:1px solid rgba(236,72,153,0.22);
+                    display:flex;align-items:center;justify-content:center;">
+                    <i class="fa-solid fa-calendar-plus" style="color:rgb(236,72,153);font-size:13px;pointer-events:none;"></i>
+                </div>
+                <div style="flex:1;min-width:0;">
+                    <p style="margin:0 0 2px;font-size:10px;font-weight:900;color:rgb(236,72,153);
+                               text-transform:uppercase;letter-spacing:0.07em;">
+                        ${count} Suggested Extra ${count === 1 ? 'Day' : 'Days'}
+                    </p>
+                    <p style="margin:0;font-size:10px;font-weight:500;color:rgb(100,116,139);line-height:1.45;">
+                        ${count} ${noun} of activities couldn't fit your schedule. Extend your trip to include ${count === 1 ? 'it' : 'them'}.
+                    </p>
+                </div>
+                <!-- Dismiss -->
+                <button onclick="_dismissSuggestedBanner(event)"
+                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold shrink-0 active:scale-90 transition-transform"
+                        style="-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-xmark pointer-events-none"></i>
+                </button>
+            </div>
+
+            <!-- Divider -->
+            <div style="height:1px;background:rgba(236,72,153,0.10);border-radius:1px;"></div>
+
+            <!-- Action button -->
+            <button onclick="addSuggestedDaysToTrip()" style="
+                width:100%;padding:11px 0;cursor:pointer;
+                background:linear-gradient(135deg, rgb(236,72,153) 0%, rgb(168,85,247) 100%);
+                border:none;border-radius:12px;color:#fff;
+                font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.07em;
+                display:flex;align-items:center;justify-content:center;gap:7px;
+                box-shadow:0 4px 14px rgba(236,72,153,0.22);
+                -webkit-tap-highlight-color:transparent;">
+                <i class="fa-solid fa-calendar-plus" style="font-size:11px;pointer-events:none;"></i>
+                Add ${count === 1 ? 'This Day' : 'These Days'} to My Trip
+            </button>
+        </div>`;
+    return wrap;
+}
+
+/**
+ * Dismiss the suggested-days banner WITHOUT confirming.
+ * Restores itin.days to the exact pre-recalculation snapshot so every activity
+ * redistribution is reverted, then clears all pending recalc state.
+ * The user lands back on the same day they were viewing before recalculation ran.
+ */
+function _dismissSuggestedBanner(e) {
+    if (e) e.stopPropagation();
+    const itin = getActiveItinerary();
+    if (!itin) return;
+
+    // Restore the full pre-recalc day list (activities returned to original days)
+    if (itin._preRecalcSnapshot) {
+        try {
+            itin.days = JSON.parse(JSON.stringify(itin._preRecalcSnapshot));
+        } catch (_) {
+            // If snapshot is somehow corrupted, at least remove any suggested days
+            itin.days = itin.days.filter(d => !d?.isSuggested);
+        }
+    }
+
+    // Clear all pending and recalc state
+    itin._pendingSuggestedDays = null;
+    itin._preRecalcSnapshot    = null;
+    itin._suggestedBanner      = { active: false, count: 0 };
+    itin._recalcMoveGuidance   = null;
+
+    // _recalcBaseSnapshot is intentionally NOT touched here.
+    // Dismiss reverts only the in-flight recalc (via _preRecalcSnapshot).
+    // If the user had previously accepted an earlier recalc, _recalcBaseSnapshot
+    // from that run remains valid and the Undo button stays correctly visible.
+    // If no prior recalc was accepted, _recalcBaseSnapshot is still null and
+    // the Undo button correctly stays hidden.
+
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    // Sync dismiss to cloud so that a hard refresh or a new-device load via
+    // loadUserItineraries() doesn't resurrect the stale pending banner.
+    syncItineraryToCloud(itin, 'save');
+    // activeItineraryDayTracker is not changed — user lands back on the same day
+    renderDetailViewTimeline();
+    _updateBurgerMenuUndoBtn();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Move-guidance banner — appears on the elapsed day the user was viewing when
+// they triggered recalculation if activities were moved out of it.  The action
+// button navigates them straight to the first future day that received spots.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the move-guidance banner element.
+ * Matches the app's dark-slate art style using a pink/purple accent palette.
+ */
+function _createRecalcMoveGuidanceBanner(itin) {
+    const guidance  = itin._recalcMoveGuidance;
+    if (!guidance)  return document.createDocumentFragment();
+    const count     = guidance.movedCount || 0;
+    const targetIdx = guidance.toDayIndices[0];
+    const dayLabel  = `Day ${targetIdx + 1}`;
+    const wrap      = document.createElement('div');
+    wrap.className  = 'suggested-banner-float recalc-move-guidance-banner';
+    wrap.style.cssText = 'margin: 0 16px 20px; padding-top: 12px;';
+
+    wrap.innerHTML = `
+        <div style="
+            background: linear-gradient(135deg, rgba(236,72,153,0.07) 0%, rgba(15,23,42,0.93) 100%);
+            border: 1px solid rgba(236,72,153,0.22);
+            border-radius: 18px;
+            padding: 14px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.25), 0 0 0 1px rgba(236,72,153,0.05) inset;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        ">
+            <!-- Header row: icon · title · dismiss X -->
+            <div style="display:flex;align-items:center;gap:10px;">
+                <div style="
+                    width:34px;height:34px;border-radius:11px;flex-shrink:0;
+                    background:rgba(236,72,153,0.10);border:1px solid rgba(236,72,153,0.22);
+                    display:flex;align-items:center;justify-content:center;">
+                    <i class="fa-solid fa-arrows-turn-right" style="color:rgb(236,72,153);font-size:13px;"></i>
+                </div>
+                <div style="flex:1;min-width:0;">
+                    <p style="margin:0 0 2px;font-size:10px;font-weight:900;color:rgb(236,72,153);
+                               text-transform:uppercase;letter-spacing:0.07em;">
+                        Activities Redistributed
+                    </p>
+                    <p style="margin:0;font-size:10px;font-weight:500;color:rgb(100,116,139);line-height:1.45;">
+                        ${count} spot${count !== 1 ? 's were' : ' was'} moved from this day to upcoming days.
+                    </p>
+                </div>
+                <!-- Dismiss -->
+                <button onclick="_dismissRecalcMoveGuidanceBanner(event)" style="
+                    width:26px;height:26px;border-radius:50%;flex-shrink:0;cursor:pointer;
+                    background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.45);
+                    display:flex;align-items:center;justify-content:center;
+                    -webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-xmark" style="color:rgb(100,116,139);font-size:9px;pointer-events:none;"></i>
+                </button>
+            </div>
+
+            <!-- Divider -->
+            <div style="height:1px;background:rgba(236,72,153,0.10);border-radius:1px;"></div>
+
+            <!-- Action button -->
+            <button onclick="_jumpToRecalcMovedDay()" style="
+                width:100%;padding:11px 0;cursor:pointer;
+                background:linear-gradient(135deg, rgb(236,72,153) 0%, rgb(168,85,247) 100%);
+                border:none;border-radius:12px;color:#fff;
+                font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.07em;
+                display:flex;align-items:center;justify-content:center;gap:7px;
+                box-shadow:0 4px 14px rgba(236,72,153,0.22);
+                -webkit-tap-highlight-color:transparent;">
+                <i class="fa-solid fa-arrow-right" style="font-size:11px;pointer-events:none;"></i>
+                View ${dayLabel} — Redistributed Activities
+            </button>
+        </div>`;
+    return wrap;
+}
+
+/** Dismiss the move-guidance banner without navigating. */
+function _dismissRecalcMoveGuidanceBanner(e) {
+    if (e) e.stopPropagation();
+    const itin = getActiveItinerary();
+    if (!itin) return;
+    itin._recalcMoveGuidance = null;
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    renderDetailViewTimeline();
+}
+
+/**
+ * Navigate to the first future day that received redistributed activities.
+ * Clears the guidance state so the banner doesn't persist after the user
+ * has been guided to the relevant content.
+ */
+function _jumpToRecalcMovedDay() {
+    const itin = getActiveItinerary();
+    if (!itin || !itin._recalcMoveGuidance) return;
+    const targetIdx = itin._recalcMoveGuidance.toDayIndices[0];
+    itin._recalcMoveGuidance = null;
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    activeItineraryDayTracker = targetIdx;
+    renderDetailViewTimeline();
+}
+
+/**
+ * Determines whether a given day is "too packed" using two independent axes:
+ *
+ *  1. TIME UTILISATION — total scheduled activity minutes ÷ available day window.
+ *     Threshold: ≥ 80 %.  Catches days with a few long activities that fill the
+ *     clock even if the spot count looks manageable.
+ *
+ *  2. SPOT COUNT — raw number of activities regardless of duration.
+ *     Threshold: ≥ 6 on max pacing, ≥ 5 on relaxed.
+ *     Catches days with many short/quick stops that create logistical busyness
+ *     even if the cumulative time is under the threshold.
+ *
+ * Done/anchored spots are counted the same as active spots — they still occupy
+ * real time in the user's day.
+ *
+ * Suggested extra days are excluded: they're hypothetical and shouldn't alarm.
+ */
+function _isPackedDay(day, itin) {
+    if (!day || day.isSuggested) return false;
+    const timeline = day.timeline || [];
+    if (timeline.length === 0) return false;
+
+    const isRelaxed  = (itin?.config?.pacing || 'max') === 'relaxed';
+    const dayStart   = itin?.config?.start ?? parseTimeToMinutes('09:00');
+    const dayEnd     = itin?.config?.end   ?? parseTimeToMinutes('21:00');
+    const windowMins = Math.max(1, dayEnd - dayStart);
+
+    // Axis 1: time utilisation
+    const totalActivityMins = timeline.reduce((sum, s) => {
+        const dur = (s.sch_end ?? (s.sch_start + 60)) - (s.sch_start ?? 0);
+        return sum + Math.max(0, dur);
+    }, 0);
+    if (totalActivityMins / windowMins >= 0.80) return true;
+
+    // Axis 2: spot count density
+    const countThreshold = isRelaxed ? 5 : 6;
+    if (timeline.length >= countThreshold) return true;
+
+    return false;
+}
+
 function renderDetailViewTimeline() {
     const container = document.getElementById('itineraryTimelineScrollContainer');
     const itin = getActiveItinerary();
     if (!itin) return;
+    // Keep undo burger button in sync on every render
+    _updateBurgerMenuUndoBtn();
 
     const _pacingIconHtml = (itin.config?.pacing === 'relaxed')
         ? '<i class="fa-solid fa-mug-hot text-sky-400 text-[11px] shrink-0"></i>'
@@ -1331,7 +2253,38 @@ function renderDetailViewTimeline() {
     const _safeTitle = (itin.title || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     document.getElementById('detailItineraryTitle').innerHTML =
         `${_pacingIconHtml}<span class="truncate min-w-0">${_safeTitle}</span>`;
-    document.getElementById('detailDayLabel').innerText = `Day ${activeItineraryDayTracker + 1} of ${itin.days.length}`;
+    // ── Day label: "Day X of Y" with optional contextual tag ─────────────────────
+    const _currentDay     = itin.days[activeItineraryDayTracker];
+    const _currentDayDate = _currentDay?.date;
+    let _relativeTag = '';
+
+    if (_currentDay?.isSuggested) {
+        // Suggested extra days appended by the recalculate engine
+        _relativeTag = `Suggested Extra Day ${_currentDay.suggestedIndex}`;
+    } else if (_currentDayDate) {
+        // Compare against device-local dates using the shared _getLocalYMD helper
+        if      (_currentDayDate === _getLocalYMD(-1)) _relativeTag = 'Yesterday';
+        else if (_currentDayDate === _getLocalYMD(0))  _relativeTag = 'Today';
+        else if (_currentDayDate === _getLocalYMD(1))  _relativeTag = 'Tomorrow';
+    }
+
+    const _dayLabelEl = document.getElementById('detailDayLabel');
+    if (_dayLabelEl) {
+        const _mainText = `Day ${activeItineraryDayTracker + 1} of ${itin.days.length}`;
+        if (_relativeTag) {
+            _dayLabelEl.innerHTML =
+                `${_mainText} <span class="font-normal normal-case tracking-normal opacity-60">(${_relativeTag})</span>`;
+        } else {
+            _dayLabelEl.textContent = _mainText;
+        }
+    }
+
+    // ── Packed-day indicator ──────────────────────────────────────────────────
+    const _packed    = _isPackedDay(itin.days[activeItineraryDayTracker], itin);
+    const _navBar    = document.getElementById('itinDayNavBar');
+    const _pkTooltip = document.getElementById('packedDayTooltip');
+    if (_navBar)    _navBar.classList.toggle('itin-packed-day-nav', _packed);
+    if (_pkTooltip) _pkTooltip.classList.toggle('hidden', !_packed);
 
     const prevBtn     = document.getElementById('itinNavPrevBtn');
     const nextBtn     = document.getElementById('itinNavNextBtn');
@@ -1346,6 +2299,14 @@ function renderDetailViewTimeline() {
     _fetchAndRenderDetailDayWeather(itin.city, activeDay.date, activeItineraryDayTracker);
 
     container.innerHTML = '';
+    container.scrollTop = 0; // reset scroll on every render so banners always start visible
+
+    // ── Move-guidance banner visibility ───────────────────────────────────────
+    // True when recalculation moved spots out of the day the user is viewing,
+    // so we can show the pink banner that guides them to where those spots went.
+    const _showMoveGuidance = !!(itin._recalcMoveGuidance &&
+        activeItineraryDayTracker === itin._recalcMoveGuidance.fromDayIdx &&
+        !_currentDay?.isSuggested);
 
     // ── Layout constants ──────────────────────────────────────────────────────
     const PX_PER_MIN  = 2.0;   // 120 px per hour
@@ -1355,14 +2316,31 @@ function renderDetailViewTimeline() {
 
     // ── Empty-day state ───────────────────────────────────────────────────────
     if (activeDay.timeline.length === 0) {
-        const emptyDiv = document.createElement('div');
-        emptyDiv.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:80px 16px;text-align:center;';
-        emptyDiv.innerHTML = `
+        // Inject both recalc banners before the empty-state message so the user
+        // understands what happened rather than seeing a blank day with no context.
+        if (_showMoveGuidance) {
+            container.appendChild(_createRecalcMoveGuidanceBanner(itin));
+        }
+        const _hasSuggestedBanner = itin._suggestedBanner?.active && !_currentDay?.isSuggested;
+        if (_hasSuggestedBanner) {
+            container.appendChild(_createSuggestedTimelineBanner(itin));
+        }
+        // Only show the empty-state illustration when no contextual banner is
+        // occupying the view — the suggested-day banner is self-explanatory and
+        // the mug + message would just add visual noise beneath it.
+        if (!_hasSuggestedBanner) {
+            const emptyDiv = document.createElement('div');
+            emptyDiv.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:80px 16px;text-align:center;';
+            const emptyMsg = activeDay.isSuggested
+                ? 'No activities could be placed on this suggested day — venue hours or durations may not fit.'
+                : 'No activities scheduled for this day.';
+            emptyDiv.innerHTML = `
             <div style="font-size:2.5rem;opacity:0.2;color:rgb(148 163 184);">
                 <i class="fa-solid fa-mug-hot"></i>
             </div>
-            <p style="font-size:11px;font-weight:600;color:rgb(71 85 105);">No activities scheduled for this day.</p>`;
-        container.appendChild(emptyDiv);
+            <p style="font-size:11px;font-weight:600;color:rgb(71 85 105);">${emptyMsg}</p>`;
+            container.appendChild(emptyDiv);
+        }
         return;
     }
 
@@ -1470,6 +2448,20 @@ function renderDetailViewTimeline() {
         // but the block can grow beyond this to fit card content.
         const propH = Math.round(durationMins * PX_PER_MIN);
 
+        // ── Move-guidance banner: injected once above the first card ─────────
+        // Appears when recalculation redistributed spots out of this day so the
+        // user has a clear call-to-action to navigate to the affected future day.
+        if (spotIndex === 0 && _showMoveGuidance) {
+            container.appendChild(_createRecalcMoveGuidanceBanner(itin));
+        }
+
+        // ── Suggested-days banner: injected once, right above the first card ──
+        // Only shown on real days (not on the suggested-day view which has its own
+        // explanation banner) and only when itin._suggestedBanner.active is true.
+        if (spotIndex === 0 && itin._suggestedBanner?.active && !_currentDay?.isSuggested) {
+            container.appendChild(_createSuggestedTimelineBanner(itin));
+        }
+
         // ── Gap spacer before this block (skipped for the first entry) ────────
         if (spotIndex > 0) {
             const prevEnd = timeline[spotIndex - 1].sch_end
@@ -1528,10 +2520,17 @@ function renderDetailViewTimeline() {
             .includes((spot.priority || '').toLowerCase());
 
         const card = document.createElement('div');
+        // Stable ID lets toggleItinerarySpotStar find this card after re-render
+        // to fire the amber burst animation without a full DOM search.
+        card.id = `itin-timeline-card-${activeItineraryDayTracker}-${spotIndex}`;
         // Base card — itin-timeline-card drives the border/glow CSS transition.
         // Done cards: itin-done-card supplies a faint border + semi-transparent bg so the
         // card reads as greyed-out without a parent filter (which would also dim Undo/Delete).
-        card.className = `itin-timeline-card border rounded-2xl p-4 relative cursor-pointer ${spot.isDone ? 'itin-done-card' : 'bg-slate-900 ' + (_isHigh ? 'starred-gold-glow' : 'border-slate-800')}`;
+        // w-full ensures the card always fills its block container regardless of
+        // whether optional badges (confidence, weather risk) are present or absent.
+        // Without w-full, card width could shrink to content width in WebKit,
+        // causing layout jitter when badges appear/disappear.
+        card.className = `itin-timeline-card w-full border rounded-2xl p-4 relative cursor-pointer ${spot.isDone ? 'itin-done-card' : 'bg-slate-900 ' + (_isHigh ? 'starred-gold-glow' : 'border-slate-800')}`;
 
         // ── Per-element done-state helpers ──────────────────────────────────────
         // Apply independently to each element so Undo/Delete can carry their own styles.
@@ -1547,12 +2546,49 @@ function renderDetailViewTimeline() {
             : 'bg-red-950/20 text-red-500 active:bg-red-900/60';
         const _nameCls      = spot.isDone ? 'text-slate-500 itin-done-text' : 'text-slate-200';
 
+        // ── Feature 1: Confidence badge ────────────────────────────────────
+        let _confBadge = '';
+        if (spot._confidence != null && !spot.isDone) {
+            const sc  = spot._confidence;
+            const col = sc >= 75 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                      : sc >= 50 ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+                                 : 'text-red-400 bg-red-500/10 border-red-500/20';
+            const lbl = sc >= 75 ? 'Strong fit' : sc >= 50 ? 'Moderate fit' : 'Weak fit';
+            _confBadge = `<span class="inline-flex items-center gap-0.5 text-[8px] px-1.5 py-0.5 rounded-lg font-bold border shrink-0 ${col}">
+                <i class="fa-solid fa-circle-dot text-[7px]"></i>${lbl}
+            </span>`;
+        }
+
+        // ── Rain-risk badge ────────────────────────────────────────────────
+        // Always rendered with a stable DOM id so the async job can show/hide
+        // it once the forecast data arrives — even on fresh itineraries that
+        // have never been through the recalculate engine.
+        // Synchronous initial visibility: spot._weatherRisk (set by recalc)
+        // OR a live cache hit via _dayHasRain + outdoor category check.
+        const _rrBadgeId  = `rrb-${itin.id}-${activeItineraryDayTracker}-${spotIndex}`;
+        const _liveRisk   = !spot.isDone && (
+            spot._weatherRisk ||
+            (_dayHasRain(itin.city, activeDay.date) && getCategoryLogic(spot.category).outdoor)
+        );
+        const _weatherRiskBadge = `<span id="${_rrBadgeId}"
+            class="inline-flex items-center gap-0.5 text-[8px] px-1.5 py-0.5 rounded-lg font-bold border text-sky-400 bg-sky-500/10 border-sky-500/20 shrink-0${_liveRisk ? '' : ' hidden'}">
+            <i class="fa-solid fa-cloud-rain text-[7px]"></i>Rain risk
+        </span>`;
+
+        // ── Feature 3: Defer badge ─────────────────────────────────────────
+        let _deferBadge = '';
+        if (spot.isDeferToLastDay && !spot.isDone) {
+            _deferBadge = `<span class="inline-flex items-center gap-0.5 text-[8px] px-1.5 py-0.5 rounded-lg font-bold border text-violet-400 bg-violet-500/10 border-violet-500/20 shrink-0">
+                <i class="fa-solid fa-clock-rotate-left text-[7px]"></i>Deferred
+            </span>`;
+        }
+
         card.innerHTML = `
             <div class="absolute top-0 bottom-0 left-0 w-1 bg-gradient-to-b from-pink-500 to-purple-600 rounded-l-2xl ${spot.isDone ? 'opacity-10' : 'opacity-80'}"></div>
 
             <div class="pl-2">
                 <!-- Row 1: category pill · time badge · weather · delete -->
-                <div class="flex items-center gap-1.5 mb-2">
+                <div class="flex items-center gap-1.5 mb-1.5">
                     <span class="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-lg font-bold border shrink-0 ${_catPillCls}">
                         <i class="fa-solid ${_catIconCls} text-[8px]"></i>
                         <span class="uppercase tracking-wider">${spot.category || 'General'}</span>
@@ -1571,6 +2607,14 @@ function renderDetailViewTimeline() {
                     </button>
                 </div>
 
+                <!-- Row 1b: confidence · rain-risk · defer badges -->
+                <!-- Always rendered so the rain-risk span (which has a stable DOM id)
+                     can be shown/hidden by the async _updateRainRiskBadge job even when
+                     the forecast cache wasn't warm at render time. -->
+                <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                    ${_confBadge}${_weatherRiskBadge}${_deferBadge}
+                </div>
+
                 <!-- Row 2: spot name -->
                 <h3 class="text-[13px] font-black truncate mb-2 ${_nameCls}">${spot.spot_name}</h3>
 
@@ -1579,9 +2623,9 @@ function renderDetailViewTimeline() {
 
                 <!-- Action row: when done → only Undo and Delete (in row 1) are active -->
                 <div class="flex gap-1.5 items-center">
-                    <!-- Ref — always disabled on done -->
+                    <!-- Ref — active (gradient) when normal; flat grey when done -->
                     <a href="${spot.instagram_url || spot.reference_link || '#'}" target="_blank"
-                       class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-[10px] font-bold py-2 rounded-xl text-white flex items-center justify-center gap-1 shadow-md active:opacity-80 transition-opacity ${spot.isDone ? 'opacity-40 pointer-events-none' : ''}">
+                       class="flex-1 text-center text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 transition-opacity ${spot.isDone ? 'bg-slate-800/40 border border-slate-700/30 text-slate-600 opacity-40 pointer-events-none' : 'bg-gradient-to-r from-pink-600 to-purple-600 text-white shadow-md active:opacity-80'}">
                         <i class="fa-solid fa-link text-[9px]"></i> Ref
                     </a>
                     <!-- Dir — always disabled on done -->
@@ -1624,6 +2668,63 @@ function renderDetailViewTimeline() {
             openSpotTrayFromItinerary(spot);
         });
 
+        // ── Feature 3: Long-press → skip / defer context menu ────────────────
+        if (!spot.isDone) {
+            let _lpTimer = null;
+            const _capturedDay = activeItineraryDayTracker;
+            const _capturedIdx = spotIndex;
+            card.addEventListener('touchstart', function (e) {
+                if (e.target.closest('button, a')) return;
+                _lpTimer = setTimeout(() => {
+                    e.preventDefault();
+                    const menu     = document.getElementById('spotContextMenu');
+                    const backdrop = document.getElementById('spotContextMenuBackdrop');
+                    if (!menu) return;
+                    menu.dataset.dayIndex  = _capturedDay;
+                    menu.dataset.spotIndex = _capturedIdx;
+
+                    // Disable "Defer to Last Day" when the current day IS the last
+                    // real day, or the itinerary has only one real day.
+                    const _itin      = getActiveItinerary();
+                    const _deferBtn  = document.getElementById('spotContextDeferBtn');
+                    const _deferSub  = document.getElementById('spotContextDeferSubtitle');
+                    if (_deferBtn && _itin) {
+                        const _realDays  = (_itin.days || [])
+                            .filter(d => !d?.isSuggested && d?.date)
+                            .sort((a, b) => a.date > b.date ? 1 : -1);
+                        const _curDate   = _itin.days[_capturedDay]?.date;
+                        const _lastDate  = _realDays[_realDays.length - 1]?.date;
+                        const _canDefer  = _realDays.length > 1 && _curDate && _lastDate && _curDate < _lastDate;
+                        _deferBtn.disabled = !_canDefer;
+                        _deferBtn.classList.toggle('opacity-40',  !_canDefer);
+                        _deferBtn.classList.toggle('pointer-events-none', !_canDefer);
+                        if (_deferSub) {
+                            _deferSub.textContent = _canDefer
+                                ? 'Move to the final day of your trip'
+                                : 'Already on the last day of the trip';
+                        }
+                    }
+
+                    if (backdrop) backdrop.classList.remove('hidden');
+                    menu.classList.remove('hidden');
+                    // Position near touch
+                    const t   = e.touches[0];
+                    const vw  = window.innerWidth;
+                    const vh  = window.innerHeight;
+                    const mw  = 200;
+                    const mh  = 110;
+                    let  left = Math.min(t.clientX, vw - mw - 10);
+                    let  top  = Math.min(t.clientY - mh - 10, vh - mh - 10);
+                    if (top < 80) top = t.clientY + 10;
+                    menu.style.left = `${left}px`;
+                    menu.style.top  = `${top}px`;
+                }, 500);
+            }, { passive: true });
+            card.addEventListener('touchend',    () => clearTimeout(_lpTimer));
+            card.addEventListener('touchmove',   () => clearTimeout(_lpTimer));
+            card.addEventListener('touchcancel', () => clearTimeout(_lpTimer));
+        }
+
         block.appendChild(card);
         container.appendChild(block);
     });
@@ -1632,23 +2733,68 @@ function renderDetailViewTimeline() {
     _appendRulerSection(lastEnd, 1440);
 
     // Per-activity weather badges — deferred so the DOM is painted first.
-    // Uses the already-warm forecast cache; no extra network round-trips.
     const _actWeatherJobs = timeline.map((spot, idx) => ({
         badgeId:  `wba-${itin.id}-${activeItineraryDayTracker}-${idx}`,
         date:     activeDay.date,
         dayIndex: activeItineraryDayTracker,
-        spot,                // passed so coord-based weather can be used for today
+        spot,
     }));
+
+    // Rain-risk badge jobs — one per spot, keyed by the stable rrb-* DOM id.
+    // Runs alongside the weather badge jobs; _updateRainRiskBadge internally
+    // calls fetchItineraryForecast which hits the cache on subsequent calls,
+    // so the net cost is at most one extra network fetch per city per hour.
+    const _rainRiskJobs = timeline.map((spot, idx) => ({
+        badgeId:  `rrb-${itin.id}-${activeItineraryDayTracker}-${idx}`,
+        date:     activeDay.date,
+        category: spot.category,
+        isDone:   spot.isDone,
+    }));
+
     setTimeout(() => {
         _actWeatherJobs.forEach(job =>
             _populateItinActivityWeatherBadge(job.badgeId, itin.city, job.date, job.dayIndex, job.spot)
         );
+        _rainRiskJobs.forEach(job =>
+            _updateRainRiskBadge(job.badgeId, itin.city, job.date, job.category, job.isDone)
+        );
     }, 0);
 
-    // Auto-scroll: snap to ~30 min before the first activity
+    // Auto-scroll: when a banner is active (move-guidance or suggested-days),
+    // scroll so the banner is fully in view with the first activity card visible
+    // below it.  Otherwise snap to ~30 min before the first activity.
+    //
+    // We use a double-rAF (requestAnimationFrame inside requestAnimationFrame) so
+    // the browser has completed two full paint cycles and the banner element has a
+    // committed offsetHeight before we compute the scroll target.  A single rAF
+    // fires before layout is flushed and produces an incorrect scrollTop.
     if (timeline.length > 0) {
-        const scrollTarget = Math.max(0, Math.round((firstStart - 30) * PX_PER_MIN));
-        requestAnimationFrame(() => { container.scrollTop = scrollTarget; });
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                const _hasBanner = _showMoveGuidance ||
+                    (itin._suggestedBanner?.active && !_currentDay?.isSuggested);
+                if (_hasBanner) {
+                    // The preamble ruler occupies firstStart * PX_PER_MIN px.
+                    // The banner is appended immediately after the ruler, so its
+                    // top edge is at exactly that pixel offset.
+                    // Subtract a comfortable top-margin (12 px) so the banner
+                    // title isn't flush with the viewport edge.
+                    const rulerHeight  = Math.round(firstStart * PX_PER_MIN);
+                    // Try to measure the real banner height so we know the first
+                    // card also fits in view; fall back to 0 if not yet rendered.
+                    const bannerEl     = container.querySelector('.suggested-timeline-banner, .recalc-move-guidance-banner');
+                    const bannerH      = bannerEl ? bannerEl.offsetHeight : 0;
+                    // Scroll target: put banner ~12 px from viewport top.
+                    // The first card starts at rulerHeight + bannerH, so if the
+                    // viewport height is reasonable both banner and card are visible.
+                    const scrollTarget = Math.max(0, rulerHeight - 12);
+                    container.scrollTop = scrollTarget;
+                } else {
+                    const scrollTarget = Math.max(0, Math.round((firstStart - 30) * PX_PER_MIN));
+                    container.scrollTop = scrollTarget;
+                }
+            });
+        });
     }
 
     // ── Footer ────────────────────────────────────────────────────────────────
@@ -1704,6 +2850,14 @@ function toggleItinerarySpotStar(dayIndex, spotIndex) {
 
     // ── 4. Re-render only the timeline — detail view stays open ──────────────
     renderDetailViewTimeline();
+    // Fire the amber burst on the freshly rendered card when starring (not unstarring)
+    if (newPriority === 'Starred') {
+        const _timelineCard = document.getElementById(`itin-timeline-card-${dayIndex}-${spotIndex}`);
+        if (_timelineCard) {
+            _timelineCard.classList.add('card-flash-star');
+            _timelineCard.addEventListener('animationend', () => _timelineCard.classList.remove('card-flash-star'), { once: true });
+        }
+    }
 }
 
 function toggleActivityDoneState(dayIndex, spotIndex) {
@@ -1786,60 +2940,648 @@ function swapActivityInTimeline(dayIndex, spotIndex) {
 }
 
 function promptRecalculateItinerary() {
+    // Note: the burger drawer is intentionally left open behind this modal.
+    // Pressing X simply closes the modal and leaves the drawer as-is.
+    // Only confirming closes the drawer (then runs the engine).
     openThematicConfirm(
         "Recalculate Flow",
-        "This will scan past days and roll over unfinished activities into today's timeline. Are you sure?",
+        "Unfinished flexible spots from past days will be moved into the best available slots in upcoming days, without overriding booked or anchored activities.",
         "Recalculate",
-        () => { executeRecalculateEngine(); },
-        false 
+        () => { closeItinDetailMenuDrawer(); executeRecalculateEngine(); },
+        'pink'
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recalculate engine v3 — 8 advanced features:
+//   1. Confidence scoring      per-placement quality badge
+//   2. Half-day awareness      skip morning-only categories when past noon today
+//   3. Skip/Defer flags        isSkipped spots excluded; isDeferToLastDay spots
+//                              placed only on the last real day
+//   4. Geo-clustering          nearest-neighbour sort of placed spots per day
+//   5. Category diversity      penalise already-saturated categories per day
+//   6. Weather-aware deferral  outdoor spots skipped on rainy/stormy days
+//   7. (Trip extension button  rendered in the suggested-day banner in JS below)
+//   8. Undo history            snapshot before run; "Undo Recalculate" in burger
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Nearest-neighbour geo sort — reorders spots array in-place. */
+function _geoClusterSort(spots) {
+    if (spots.length < 3) return spots;
+    const hasCoords = s => s._lat != null && s._lng != null;
+    if (!spots.some(hasCoords)) return spots;
+
+    function dist(a, b) {
+        if (!hasCoords(a) || !hasCoords(b)) return 0;
+        const dx = a._lat - b._lat, dy = a._lng - b._lng;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    const out     = [spots[0]];
+    const pending = spots.slice(1);
+    while (pending.length) {
+        const last = out[out.length - 1];
+        let   best = 0, bestDist = Infinity;
+        for (let i = 0; i < pending.length; i++) {
+            const d = dist(last, pending[i]);
+            if (d < bestDist) { bestDist = d; best = i; }
+        }
+        out.push(pending.splice(best, 1)[0]);
+    }
+    return out;
+}
+
+/** Confidence score (0–100) for a single placed activity. */
+function _calcConfidence(spot, slotStart, slotEnd, dayStart, dayEnd, catCountMap, isToday, isSuggested) {
+    let score = 55; // base
+
+    // +15 window fit: slot falls fully within logicOpen–logicClose
+    const open  = spot.logicOpen  ?? dayStart;
+    const close = spot.logicClose ?? dayEnd;
+    if (slotStart >= open && slotEnd <= close) score += 15;
+
+    // +10 category diversity: this category not yet saturated on this day
+    const catKey = (spot.category || 'default').toLowerCase();
+    if ((catCountMap[catKey] || 0) < 2) score += 10;
+
+    // +10 starred placed in first half of day
+    const _isHigh = ['high', '🔥', 'must do', 'starred'].includes((spot.priority || '').toLowerCase());
+    const dayMid  = dayStart + (dayEnd - dayStart) / 2;
+    if (_isHigh && slotStart <= dayMid) score += 10;
+
+    // +10 today's remaining hours: not a last-minute cram
+    if (isToday && slotStart > dayMid) score -= 10;
+
+    // -15 suggested extra day (uncertain)
+    if (isSuggested) score -= 15;
+
+    // -10 weather risk flagged
+    if (spot._weatherRisk) score -= 10;
+
+    return Math.max(0, Math.min(100, score));
+}
+
+/** Check if a day's date has a rainy/stormy forecast using the warm cache. */
+function _dayHasRain(city, dateYMD) {
+    if (!city || !dateYMD) return false;
+    const cached = itinWeatherCache.get(city.trim().toLowerCase());
+    if (!cached) return false;
+    const dayFc = cached.days.find(d => d.date === dateYMD);
+    if (!dayFc) return false;
+    const ic = (dayFc.iconClass || '').toLowerCase();
+    return ic.includes('rain') || ic.includes('storm') || ic.includes('thunder') || ic.includes('drizzle');
 }
 
 function executeRecalculateEngine() {
     document.getElementById('buildingItineraryLoaderPopup').classList.remove('hidden');
-    
+
     setTimeout(() => {
         const itin = getActiveItinerary();
-        let missedSpots = [];
-        
-        for (let i = 0; i < activeItineraryDayTracker; i++) {
-            let day = itin.days[i];
+        if (!itin) {
+            document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
+            return;
+        }
+
+        const todayYMD  = _getLocalYMD(0);
+        const now       = new Date();
+        const nowMins   = now.getHours() * 60 + now.getMinutes();
+        const isPastNoon = nowMins >= 720; // 12:00 — half-day awareness
+
+        // ── Move-guidance tracking ────────────────────────────────────────────
+        // Remembers which origin day lost spots and which future days received them
+        // so we can display a banner + navigation arrow after recalc completes.
+        const _recalcOriginDayIdx       = activeItineraryDayTracker;
+        const _originDayLiftedRowids    = new Set(); // rowids lifted FROM the origin day
+        const _affectedFutureDayIndices = new Set(); // itin.days[] indices that received them
+
+        // ── Pacing config ─────────────────────────────────────────────────────
+        const isRelaxed   = (itin.config?.pacing || 'max') === 'relaxed';
+        const bufferMins  = isRelaxed ? 40 : 15;
+        const durationKey = isRelaxed ? 'durationRelaxed' : 'durationMax';
+        const dayStart    = itin.config?.start ?? parseTimeToMinutes("09:00");
+        const dayEnd      = itin.config?.end   ?? parseTimeToMinutes("21:00");
+
+        // ── Clean up any suggested extra days from a prior recalculation ──────
+        itin.days = itin.days.filter(d => !d?.isSuggested);
+        // Reset the persistent banners — will be re-set below if applicable
+        itin._suggestedBanner      = { active: false, count: 0 };
+        itin._recalcMoveGuidance   = null;
+        itin._pendingSuggestedDays = null;
+
+        // ── Snapshot for banner-dismiss rollback ──────────────────────────────
+        // Deep copy of real days BEFORE any activity redistribution.
+        // If the user later taps X on the suggested-day banner, _dismissSuggestedBanner
+        // restores itin.days from this snapshot, reverting every recalc change.
+        itin._preRecalcSnapshot = JSON.parse(JSON.stringify(itin.days));
+
+        // ── Step 1: Lift unfinished flexible spots from ALL elapsed past days ─
+        // isSkipped spots are excluded (Feature 3).
+        const missedSpots = [];
+        let   deferSpots  = []; // Feature 3: isDeferToLastDay
+        for (let i = 0; i < itin.days.length; i++) {
+            const day = itin.days[i];
+            if (!day?.date || day.date >= todayYMD || day.isSuggested) continue;
             for (let j = day.timeline.length - 1; j >= 0; j--) {
-                if (!day.timeline[j].isDone) {
-                    missedSpots.push(day.timeline[j]);
-                    day.timeline.splice(j, 1); 
-                }
+                const s = day.timeline[j];
+                if (s.isDone || s.isAnchored || s.isSkipped) continue;
+                const cat    = getCategoryLogic(s.category);
+                const newDur = cat[durationKey] ?? s.logicDur;
+                const lifted = { ...s, logicDur: newDur };
+                day.timeline.splice(j, 1);
+                // Track spots lifted from the day the user was viewing when they triggered recalc
+                if (i === _recalcOriginDayIdx) _originDayLiftedRowids.add(s.rowid);
+                if (s.isDeferToLastDay) { deferSpots.push(lifted); }
+                else                   { missedSpots.push(lifted); }
             }
         }
 
-        if (missedSpots.length > 0) {
-            let currentDay = itin.days[activeItineraryDayTracker];
-            let currentStart = parseTimeToMinutes("09:00"); 
-            
-            missedSpots.reverse().forEach(spot => {
-                spot.sch_start = currentStart;
-                spot.sch_end = currentStart + spot.logicDur;
-                currentStart = spot.sch_end + 15;
-                currentDay.timeline.unshift(spot);
-            });
-
-            currentDay.timeline.sort((a, b) => a.sch_start - b.sch_start);
-            let recalcTime = parseTimeToMinutes("09:00");
-            currentDay.timeline.forEach(s => {
-                s.sch_start = recalcTime;
-                s.sch_end = recalcTime + s.logicDur;
-                recalcTime = s.sch_end + 15;
-            });
-
-            localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
-            renderDetailViewTimeline();
-            if(typeof showFormErrorSpeechBubble === 'function') showFormErrorSpeechBubble(["Recalculation Complete: Missed items rolled over!"]);
-        } else {
-            if(typeof showFormErrorSpeechBubble === 'function') showFormErrorSpeechBubble(["No missed activities found to roll over!"]);
+        if (missedSpots.length === 0 && deferSpots.length === 0) {
+            // Nothing was moved — discard the snapshot; no undo state created.
+            itin._preRecalcSnapshot = null;
+            showRecalcResultBubble(
+                ["No pending activities found in past days."],
+                "Nothing to Reschedule",
+                "fa-circle-info"
+            );
+            document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
+            return;
         }
-        
+
+        // ── Feature 2: Half-day awareness ────────────────────────────────────
+        // If recalc fires after noon, morning-only spots can't go on today.
+        // They are kept in missedSpots but skipped during today's window.
+
+        // ── Priority sort: starred first, then earliest-opening venues ────────
+        // Feature 5: category diversity — also used during placement
+        missedSpots.sort((a, b) => {
+            const starDiff = (b.isStarred ? 1 : 0) - (a.isStarred ? 1 : 0);
+            if (starDiff !== 0) return starDiff;
+            return (a.logicOpen ?? dayStart) - (b.logicOpen ?? dayStart);
+        });
+
+        // ── Step 2: Place missed spots into today + future real days ──────────
+        const remaining = [...missedSpots];
+
+        const realFutureDays = itin.days.filter(d => d?.date && d.date >= todayYMD && !d.isSuggested);
+
+        // Feature 3: Defer spots go only on the last real day
+        const lastRealDay = realFutureDays[realFutureDays.length - 1] || null;
+
+        for (const day of realFutureDays) {
+            if (remaining.length === 0 && deferSpots.length === 0) break;
+
+            const isToday     = day.date === todayYMD;
+            const isLastDay   = (lastRealDay && day.date === lastRealDay.date);
+            const existingIds = new Set(day.timeline.map(s => s.rowid));
+            const anchored    = day.timeline
+                .filter(s => s.isAnchored)
+                .sort((a, b) => a.sch_start - b.sch_start);
+
+            // Feature 6: Weather-aware deferral
+            const dayHasRain = _dayHasRain(itin.city, day.date);
+
+            // Feature 5: category counts already on this day
+            const catCountMap = {};
+            day.timeline.forEach(s => {
+                const k = (s.category || 'default').toLowerCase();
+                catCountMap[k] = (catCountMap[k] || 0) + 1;
+            });
+
+            // Build free windows around anchored blocks
+            const windows = [];
+            let cursor = isToday ? Math.max(dayStart, nowMins + bufferMins) : dayStart;
+            for (const anchor of anchored) {
+                const gapEnd = anchor.sch_start - bufferMins;
+                if (gapEnd > cursor + 30) windows.push({ start: cursor, end: gapEnd });
+                cursor = anchor.sch_end + bufferMins;
+            }
+            if (cursor < dayEnd - 30) windows.push({ start: cursor, end: dayEnd });
+
+            // Which pool to place from this day
+            const poolForThisDay = isLastDay
+                ? [...remaining, ...deferSpots]
+                : [...remaining];
+
+            for (const win of windows) {
+                if (poolForThisDay.length === 0) break;
+
+                // Feature 5: re-sort remaining within window by category diversity penalty
+                poolForThisDay.sort((a, b) => {
+                    const starDiff = (b.isStarred ? 1 : 0) - (a.isStarred ? 1 : 0);
+                    if (starDiff !== 0) return starDiff;
+                    const catA = (a.category || 'default').toLowerCase();
+                    const catB = (b.category || 'default').toLowerCase();
+                    const penA = catCountMap[catA] || 0;
+                    const penB = catCountMap[catB] || 0;
+                    if (penA !== penB) return penA - penB; // less-used category first
+                    return (a.logicOpen ?? dayStart) - (b.logicOpen ?? dayStart);
+                });
+
+                let t = win.start;
+                const placed = new Set();
+
+                for (let i = 0; i < poolForThisDay.length; i++) {
+                    const spot = poolForThisDay[i];
+                    if (existingIds.has(spot.rowid)) { placed.add(i); continue; }
+
+                    const cat = getCategoryLogic(spot.category);
+
+                    // Feature 2: Half-day awareness — skip morning-only spots today if past noon
+                    if (isToday && isPastNoon && cat.morningOnly) continue;
+
+                    // Feature 6: Skip outdoor spots on rainy days (defer to next day)
+                    if (dayHasRain && cat.outdoor) {
+                        spot._weatherRisk = true;
+                        continue;
+                    }
+
+                    const slotStart = Math.max(t, spot.logicOpen ?? dayStart);
+                    const slotEnd   = slotStart + spot.logicDur;
+
+                    if (slotEnd > win.end)                      continue;
+                    if (slotEnd > (spot.logicClose ?? dayEnd))  continue;
+
+                    // Feature 5: update category count
+                    const catKey = (spot.category || 'default').toLowerCase();
+                    catCountMap[catKey] = (catCountMap[catKey] || 0) + 1;
+
+                    // Feature 1: Confidence score
+                    const confidence = _calcConfidence(
+                        spot, slotStart, slotEnd, dayStart, dayEnd,
+                        catCountMap, isToday, false
+                    );
+
+                    day.timeline.push({
+                        ...spot,
+                        sch_start:   slotStart,
+                        sch_end:     slotEnd,
+                        isAnchored:  false,
+                        isDone:      false,
+                        _confidence: confidence,
+                    });
+                    existingIds.add(spot.rowid);
+                    // Track if a spot from the origin day landed on this future day
+                    if (_originDayLiftedRowids.has(spot.rowid)) {
+                        _affectedFutureDayIndices.add(itin.days.indexOf(day));
+                    }
+                    t = slotEnd + bufferMins;
+                    placed.add(i);
+                }
+
+                // Remove placed spots from the correct source arrays
+                const placedArr = [...placed].sort((a, b) => b - a);
+                placedArr.forEach(i => {
+                    const spot = poolForThisDay[i];
+                    const ri = remaining.indexOf(spot);
+                    const di = deferSpots.indexOf(spot);
+                    if (ri !== -1) remaining.splice(ri, 1);
+                    if (di !== -1) deferSpots.splice(di, 1);
+                    poolForThisDay.splice(i, 1);
+                });
+            }
+
+            // Feature 4: Geo-cluster the newly placed spots (non-anchored only)
+            const anchoredPart  = day.timeline.filter(s => s.isAnchored);
+            const flexPart      = day.timeline.filter(s => !s.isAnchored);
+            const clusteredFlex = _geoClusterSort(flexPart);
+            // Re-assign start/end times in geo order, preserving durations
+            let rt = anchoredPart.length > 0
+                ? Math.max(dayStart, anchoredPart[anchoredPart.length - 1].sch_end + bufferMins)
+                : (isToday ? Math.max(dayStart, nowMins + bufferMins) : dayStart);
+            clusteredFlex.forEach(s => {
+                const dur   = s.sch_end - s.sch_start;
+                s.sch_start = Math.max(rt, s.logicOpen ?? dayStart);
+                s.sch_end   = s.sch_start + dur;
+                rt          = s.sch_end + bufferMins;
+            });
+            day.timeline = [...anchoredPart, ...clusteredFlex].sort((a, b) => a.sch_start - b.sch_start);
+        }
+
+        // ── Move-guidance: store which future days received spots from origin day ─
+        // Banner will appear on the origin day's timeline view so the user isn't
+        // left wondering why their day looks empty after recalculation.
+        if (_originDayLiftedRowids.size > 0 && _affectedFutureDayIndices.size > 0) {
+            itin._recalcMoveGuidance = {
+                fromDayIdx:   _recalcOriginDayIdx,
+                toDayIndices: [..._affectedFutureDayIndices].sort((a, b) => a - b),
+                movedCount:   _originDayLiftedRowids.size,
+            };
+        }
+
+        // ── Step 3: Suggested extra days for overflow activities ──────────────
+        // Suggested days are collected locally and stored in itin._pendingSuggestedDays.
+        // They are NOT added to itin.days until the user confirms the banner, so the
+        // "Day X of Y" header count stays correct while the confirmation is pending.
+        let suggestedCount = 0;
+        const _suggestedDayObjects = []; // local staging area; never pushed to itin.days here
+        if (remaining.length > 0 || deferSpots.length > 0) {
+            const overflow = [...remaining, ...deferSpots];
+            const realDates = itin.days
+                .filter(d => !d.isSuggested && d?.date)
+                .map(d => d.date)
+                .sort();
+            let lastDate = realDates[realDates.length - 1] || todayYMD;
+
+            while (overflow.length > 0 && suggestedCount < 7) {
+                suggestedCount++;
+
+                const [y, mo, dy] = lastDate.split('-').map(Number);
+                const nextD = new Date(y, mo - 1, dy + 1);
+                lastDate = `${nextD.getFullYear()}-${String(nextD.getMonth() + 1).padStart(2, '0')}-${String(nextD.getDate()).padStart(2, '0')}`;
+
+                const sugDay = {
+                    date:           lastDate,
+                    isSuggested:    true,
+                    suggestedIndex: suggestedCount,
+                    timeline:       [],
+                };
+                // Stage in local array; user must confirm before it joins itin.days
+                _suggestedDayObjects.push(sugDay);
+
+                const existingIds  = new Set();
+                const catCountMap2 = {};
+                let t              = dayStart;
+                const placed       = new Set();
+
+                for (let i = 0; i < overflow.length; i++) {
+                    const spot      = overflow[i];
+                    const cat       = getCategoryLogic(spot.category);
+                    // Feature 6: still flag outdoor risk on suggested days with rain
+                    const rainRisk  = _dayHasRain(itin.city, lastDate) && cat.outdoor;
+                    if (rainRisk) { spot._weatherRisk = true; }
+
+                    const slotStart = Math.max(t, spot.logicOpen ?? dayStart);
+                    const slotEnd   = slotStart + spot.logicDur;
+
+                    if (slotEnd > dayEnd)                      continue;
+                    if (slotEnd > (spot.logicClose ?? dayEnd)) continue;
+
+                    // Feature 5: category diversity on suggested days
+                    const catKey = (spot.category || 'default').toLowerCase();
+                    if ((catCountMap2[catKey] || 0) >= 3) continue; // soft cap
+
+                    catCountMap2[catKey] = (catCountMap2[catKey] || 0) + 1;
+
+                    // Feature 1: Confidence score
+                    const confidence = _calcConfidence(
+                        spot, slotStart, slotEnd, dayStart, dayEnd,
+                        catCountMap2, false, true
+                    );
+
+                    sugDay.timeline.push({
+                        ...spot,
+                        sch_start:   slotStart,
+                        sch_end:     slotEnd,
+                        isAnchored:  false,
+                        isDone:      false,
+                        _confidence: confidence,
+                    });
+                    existingIds.add(spot.rowid);
+                    t = slotEnd + bufferMins;
+                    placed.add(i);
+                }
+                [...placed].sort((a, b) => b - a).forEach(i => overflow.splice(i, 1));
+
+                // Feature 4: Geo-cluster suggested day too
+                sugDay.timeline = _geoClusterSort(sugDay.timeline);
+                // Re-sequence times after clustering
+                let rt2 = dayStart;
+                sugDay.timeline.forEach(s => {
+                    const dur   = s.sch_end - s.sch_start;
+                    s.sch_start = Math.max(rt2, s.logicOpen ?? dayStart);
+                    s.sch_end   = s.sch_start + dur;
+                    rt2         = s.sch_end + bufferMins;
+                });
+            }
+        }
+
+        // ── Step 4: Persist + refresh UI ─────────────────────────────────────
+        const totalMissed = missedSpots.length + deferSpots.length;
+        const totalRemain = remaining.length + deferSpots.length;
+        const placed      = totalMissed - totalRemain;
+
+        // ── Undo baseline (replaces the old _recalcHistory stack) ────────────
+        // _recalcBaseSnapshot is the single "go back here on undo" anchor.
+        // It is only set when null — sequential recalcs all undo to the SAME
+        // original baseline so the user always returns to a clean non-recalculated state.
+        //
+        // Case A — activities placed, no overflow banner:
+        //   The result is applied immediately; set the baseline now and discard
+        //   _preRecalcSnapshot (no longer needed for a dismiss rollback).
+        //
+        // Case B — overflow banner pending:
+        //   Keep _preRecalcSnapshot alive (dismiss needs it).
+        //   The baseline will be promoted inside addSuggestedDaysToTrip() once confirmed.
+        //
+        // Case C — placed == 0 (nothing moved, "already optimal"):
+        //   No state changed; discard _preRecalcSnapshot, leave baseline alone.
+        if (suggestedCount > 0) {
+            // Case B: store pending suggested days; baseline handled on confirm
+            itin._pendingSuggestedDays = _suggestedDayObjects;
+            itin._suggestedBanner      = { active: true, count: suggestedCount };
+            // _preRecalcSnapshot stays alive for potential dismiss rollback
+        } else if (placed > 0) {
+            // Case A: immediate result — lock in the undo baseline if not already set
+            if (!itin._recalcBaseSnapshot) {
+                itin._recalcBaseSnapshot = itin._preRecalcSnapshot;
+            }
+            itin._preRecalcSnapshot = null; // no longer needed
+        } else {
+            // Case C: nothing actually changed
+            itin._preRecalcSnapshot = null;
+        }
+
+        localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+        // Always sync to cloud here so the pending banner state (_pendingSuggestedDays,
+        // _suggestedBanner, _preRecalcSnapshot) survives hard refresh and is accessible
+        // from any device via loadUserItineraries().  Without this call the cloud still
+        // holds the pre-recalc snapshot and overwrites the in-flight state on next load.
+        syncItineraryToCloud(itin, 'save');
+        renderDetailViewTimeline();
+        _updateBurgerMenuUndoBtn();
+        const msgs        = [];
+        if (placed > 0) {
+            msgs.push(`${placed} activit${placed !== 1 ? 'ies' : 'y'} redistributed into upcoming days.`);
+        }
+        if (suggestedCount > 0) {
+            msgs.push(`${suggestedCount} extra day${suggestedCount !== 1 ? 's' : ''} suggested — tap the banner to extend your trip.`);
+        }
+        if (totalRemain > 0) {
+            msgs.push(`${totalRemain} activit${totalRemain !== 1 ? 'ies' : 'y'} couldn't fit even with suggested days.`);
+        }
+        if (isPastNoon) {
+            msgs.push("Morning-only spots (cafés, museums) deferred — recalculated against remaining hours.");
+        }
+        if (msgs.length === 0) msgs.push("All activities already optimally placed!");
+
+        showRecalcResultBubble(msgs);
         document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
+
     }, 1000);
+}
+
+// ── Undo last accepted recalculation ─────────────────────────────────────────
+// Uses itin._recalcBaseSnapshot — a single snapshot of the state before the
+// first un-undone recalculation was accepted.  This replaces the old
+// _recalcHistory stack, which caused the undo button to appear spuriously.
+function undoRecalculate() {
+    const itin = getActiveItinerary();
+    if (!itin || !itin._recalcBaseSnapshot) {
+        showRecalcResultBubble(
+            ["Nothing to undo — the itinerary is already in its pre-recalculation state."],
+            "Nothing to Undo",
+            "fa-circle-info"
+        );
+        return;
+    }
+
+    // Restore from the baseline snapshot.
+    // _recalcBaseSnapshot is always a plain array (set from _preRecalcSnapshot,
+    // which is built via JSON.parse(JSON.stringify(...))), so no parse step needed.
+    itin.days = JSON.parse(JSON.stringify(itin._recalcBaseSnapshot));
+
+    // Clamp the day tracker to the restored array length.
+    // Without this, if the user was on a day that no longer exists after undo
+    // (e.g. Day 2 after a 1-day restore), renderDetailViewTimeline would show
+    // "Day 2 of 1" until the user navigated away and back.
+    if (activeItineraryDayTracker >= itin.days.length) {
+        activeItineraryDayTracker = Math.max(0, itin.days.length - 1);
+    }
+
+    // Clear ALL recalc state — the itinerary is now back to a clean baseline
+    itin._recalcBaseSnapshot   = null;
+    itin._recalcMoveGuidance   = null;
+    itin._pendingSuggestedDays = null;
+    itin._preRecalcSnapshot    = null;
+    itin._suggestedBanner      = { active: false, count: 0 };
+
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    renderDetailViewTimeline();
+    _updateBurgerMenuUndoBtn();
+    showRecalcResultBubble(
+        ["Recalculation undone. Previous schedule restored."],
+        "Undo Successful",
+        "fa-arrow-rotate-left"
+    );
+}
+
+/**
+ * Show the Undo button only when the itinerary is in a confirmed-recalculated
+ * state — i.e. _recalcBaseSnapshot is non-null.  The button is hidden as soon
+ * as the user undoes, edits (rebuilds), or is in a fresh/pre-recalc state.
+ */
+function _updateBurgerMenuUndoBtn() {
+    const itin = getActiveItinerary();
+    const btn  = document.getElementById('itinBurgerUndoBtn');
+    if (!btn) return;
+    btn.classList.toggle('hidden', !(itin && itin._recalcBaseSnapshot));
+}
+
+// ── Feature 3: Skip an activity from the timeline ────────────────────────────
+function skipActivityFromTimeline(dayIndex, spotIndex) {
+    const itin = getActiveItinerary();
+    if (!itin?.days?.[dayIndex]?.timeline?.[spotIndex]) return;
+    const spot = itin.days[dayIndex].timeline[spotIndex];
+    spot.isSkipped = true;
+    itin.days[dayIndex].timeline.splice(spotIndex, 1);
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    closeSpotContextMenu();
+    renderDetailViewTimeline();
+}
+
+// ── Feature 3: Defer an activity to the last real day ────────────────────────
+function deferActivityToLastDay(dayIndex, spotIndex) {
+    const itin = getActiveItinerary();
+    if (!itin?.days?.[dayIndex]?.timeline?.[spotIndex]) return;
+    const spot = itin.days[dayIndex].timeline[spotIndex];
+    spot.isDeferToLastDay = true;
+    // Find the last non-suggested day
+    const realDays = itin.days.filter(d => !d?.isSuggested && d?.date).sort((a, b) => a.date > b.date ? 1 : -1);
+    const lastDay  = realDays[realDays.length - 1];
+    if (!lastDay) { closeSpotContextMenu(); return; }
+    // Move to last day at dayEnd (will be re-sorted by next recalc)
+    const end       = itin.config?.end ?? parseTimeToMinutes("21:00");
+    const newStart  = Math.max(end - (spot.logicDur || 60), parseTimeToMinutes("09:00"));
+    itin.days[dayIndex].timeline.splice(spotIndex, 1);
+    lastDay.timeline.push({
+        ...spot,
+        sch_start: newStart,
+        sch_end:   newStart + (spot.logicDur || 60),
+        isDeferToLastDay: true,
+    });
+    lastDay.timeline.sort((a, b) => a.sch_start - b.sch_start);
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    closeSpotContextMenu();
+    renderDetailViewTimeline();
+    if (typeof showFormErrorSpeechBubble === 'function') {
+        showFormErrorSpeechBubble([`Deferred to Day ${itin.days.indexOf(lastDay) + 1} — will re-sort on next Recalculate.`]);
+    }
+}
+
+/** Close the long-press context menu + its backdrop. */
+function closeSpotContextMenu() {
+    const m = document.getElementById('spotContextMenu');
+    const b = document.getElementById('spotContextMenuBackdrop');
+    if (m) m.classList.add('hidden');
+    if (b) b.classList.add('hidden');
+}
+
+// ── Feature 7: Promote suggested extra days directly into the real itinerary ──
+// Pulls from itin._pendingSuggestedDays (staged during recalculation — never yet
+// in itin.days), promotes each day to a real day, then syncs to Google Sheets.
+// No modal or form is opened — the days are created inline on confirmation.
+function addSuggestedDaysToTrip() {
+    const itin = getActiveItinerary();
+    if (!itin) return;
+
+    // Use the pending staging area set during recalculation.
+    // Fall back to the legacy isSuggested path for any stale data from older sessions.
+    const pendingDays = itin._pendingSuggestedDays
+        ?? itin.days.filter(d => d?.isSuggested && d?.date).sort((a, b) => (a.date > b.date ? 1 : -1));
+
+    if (!pendingDays || pendingDays.length === 0) return;
+
+    // Remove any legacy isSuggested entries still in itin.days (safety net)
+    itin.days = itin.days.filter(d => !d?.isSuggested);
+
+    // The index where the first promoted day will land
+    const firstNewDayIdx = itin.days.length;
+
+    // Promote each pending day to a full real day
+    pendingDays.forEach(d => {
+        const realDay = { ...d };
+        delete realDay.isSuggested;
+        delete realDay.suggestedIndex;
+        itin.days.push(realDay);
+    });
+
+    // ── Undo baseline: lock in the pre-recalc state as the restore point ────
+    // Only set when null — sequential recalcs preserve the ORIGINAL baseline so
+    // undo always returns the user to their last non-recalculated state.
+    if (!itin._recalcBaseSnapshot && itin._preRecalcSnapshot) {
+        itin._recalcBaseSnapshot = itin._preRecalcSnapshot;
+    }
+
+    // Clear ALL pending / in-flight state — confirmation is final
+    itin._pendingSuggestedDays = null;
+    itin._preRecalcSnapshot    = null;
+    itin._suggestedBanner      = { active: false, count: 0 };
+    itin._recalcMoveGuidance   = null;
+
+    // Persist to localStorage AND sync the updated itinerary to Google Sheets
+    syncItineraryToCloud(itin, 'save');
+    _updateBurgerMenuUndoBtn();
+
+    // Snap to the first newly created day
+    activeItineraryDayTracker = firstNewDayIdx;
+    renderDetailViewTimeline();
+
+    // Brief confirmation bubble
+    if (typeof showFormErrorSpeechBubble === 'function') {
+        showFormErrorSpeechBubble([
+            `${pendingDays.length} day${pendingDays.length !== 1 ? 's' : ''} added to your trip.`
+        ]);
+    }
 }
 
 function parseTimeToMinutes(timeStr) {
@@ -1872,6 +3614,110 @@ function getCategoryLogic(catString) {
     const lower = catString.toLowerCase();
     for (let key in CATEGORY_DEFAULTS) { if (lower.includes(key)) return CATEGORY_DEFAULTS[key]; }
     return CATEGORY_DEFAULTS['default'];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recalculate result bubble — rich structured popup anchored to the burger btn
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _recalcBubbleTimer = null;
+
+/**
+ * Maps a result message string to an icon + colour token for the section row.
+ * Keeps the visual meaning consistent regardless of message wording.
+ */
+function _recalcMsgMeta(msg) {
+    const m = msg.toLowerCase();
+    if (m.includes('redistributed') || m.includes('optimally'))
+        return { icon: 'fa-circle-check',         color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20' };
+    if (m.includes('suggested') || m.includes('extra day') || m.includes('extend'))
+        return { icon: 'fa-calendar-plus',         color: 'text-amber-400',   bg: 'bg-amber-500/10',   border: 'border-amber-500/20'   };
+    if (m.includes("couldn't fit") || m.includes('failed') || m.includes('corrupted'))
+        return { icon: 'fa-triangle-exclamation',  color: 'text-red-400',     bg: 'bg-red-500/10',     border: 'border-red-500/20'     };
+    if (m.includes('morning') || m.includes('noon') || m.includes('deferred'))
+        return { icon: 'fa-sun',                   color: 'text-sky-400',     bg: 'bg-sky-500/10',     border: 'border-sky-500/20'     };
+    if (m.includes('undo') || m.includes('restored') || m.includes('previous'))
+        return { icon: 'fa-arrow-rotate-left',     color: 'text-indigo-400',  bg: 'bg-indigo-500/10',  border: 'border-indigo-500/20'  };
+    if (m.includes('no pending') || m.includes('no recalculation') || m.includes('no match') || m.includes('no unused'))
+        return { icon: 'fa-circle-info',           color: 'text-slate-400',   bg: 'bg-slate-700/30',   border: 'border-slate-600/30'   };
+    return   { icon: 'fa-circle-dot',              color: 'text-slate-400',   bg: 'bg-slate-700/30',   border: 'border-slate-600/30'   };
+}
+
+/**
+ * Show the structured recalculate result bubble anchored to the burger menu button.
+ * @param {string[]} msgs      — array of result message strings
+ * @param {string}   [titleOverride] — optional custom header title
+ * @param {string}   [headerIcon]    — optional FA icon class for the header dot
+ */
+function showRecalcResultBubble(msgs, titleOverride, headerIcon) {
+    const bubble   = document.getElementById('recalcResultBubble');
+    const sections = document.getElementById('recalcBubbleSections');
+    const titleEl  = document.getElementById('recalcBubbleTitle');
+    const iconEl   = document.getElementById('recalcBubbleIcon');
+    const anchorEl = document.getElementById('itinBurgerMenuBtn');
+    if (!bubble || !sections) return;
+
+    // ── Populate header ───────────────────────────────────────────────────────
+    if (titleEl) titleEl.textContent = titleOverride || 'Recalculate Results';
+    if (iconEl) {
+        iconEl.className = `fa-solid ${headerIcon || 'fa-rotate-right'} text-amber-400 text-[10px]`;
+    }
+
+    // ── Populate sections ─────────────────────────────────────────────────────
+    sections.innerHTML = '';
+    msgs.forEach(msg => {
+        const meta = _recalcMsgMeta(msg);
+        const row  = document.createElement('div');
+        row.className = `flex items-start gap-2.5 p-2.5 rounded-xl border ${meta.bg} ${meta.border}`;
+        row.innerHTML = `
+            <div class="w-6 h-6 rounded-lg ${meta.bg} border ${meta.border} flex items-center justify-center shrink-0 mt-0.5">
+                <i class="fa-solid ${meta.icon} ${meta.color} text-[9px]"></i>
+            </div>
+            <p class="text-[10px] font-semibold text-slate-300 leading-relaxed">${msg}</p>`;
+        sections.appendChild(row);
+    });
+
+    // ── Position below the burger menu button ─────────────────────────────────
+    if (anchorEl) {
+        const rect    = anchorEl.getBoundingClientRect();
+        const bubbleW = 288;
+        // Right-align bubble to the button's right edge; clamp to viewport
+        let   left    = rect.right - bubbleW;
+        if (left < 8) left = 8;
+        const top     = rect.bottom + 6;  // 6px gap — tail overlaps card border cleanly
+
+        bubble.style.top  = `${top}px`;
+        bubble.style.left = `${left}px`;
+
+        // Position the tail so it points at the burger button's horizontal centre.
+        // CSS `right` measures from the bubble's right edge inward, so:
+        //   tailRight = (bubble right edge) – (button centre X) – (half tail width)
+        //             = rect.right           – (rect.left+rect.right)/2 – 7
+        //             = (rect.right – rect.left) / 2 – 7  (≈ buttonWidth/2 – 7)
+        const tail = document.getElementById('recalcBubbleTail');
+        if (tail) {
+            const btnCenterX   = (rect.left + rect.right) / 2;
+            const bubbleRight  = left + bubbleW;          // = rect.right (right-aligned)
+            const tailRight    = Math.max(8, Math.round(bubbleRight - btnCenterX - 7));
+            tail.style.right   = `${tailRight}px`;
+            tail.style.left    = 'auto';
+        }
+    }
+
+    // ── Show + auto-dismiss ───────────────────────────────────────────────────
+    bubble.classList.remove('hidden');
+    const backdrop = document.getElementById('recalcResultBubbleBackdrop');
+    if (backdrop) backdrop.classList.remove('hidden');
+    clearTimeout(_recalcBubbleTimer);
+    _recalcBubbleTimer = setTimeout(() => closeRecalcResultBubble(), 7000);
+}
+
+function closeRecalcResultBubble() {
+    clearTimeout(_recalcBubbleTimer);
+    const bubble   = document.getElementById('recalcResultBubble');
+    const backdrop = document.getElementById('recalcResultBubbleBackdrop');
+    if (bubble)   bubble.classList.add('hidden');
+    if (backdrop) backdrop.classList.add('hidden');
 }
 
 function showFormErrorSpeechBubble(missingFieldsArray) {
@@ -2178,21 +4024,35 @@ function generateIntelligentItinerary() {
             syncItineraryToCloud(newItinerary, 'save');
 
             // ── Reset transient form state ────────────────────────────────────
+            // Capture before clearing so the post-reset navigation branch is correct
+            const _wasEditing  = isEditingMode;
+            const _rebuiltId   = newItinerary.id;
+            const _totalSpots  = newItinerary.days.reduce((sum, d) => sum + d.timeline.length, 0);
+            const _dayCount    = newItinerary.days.length;
+            const _builtTitle  = newItinerary.title;
+
             isEditingMode                = false;
             editingItinId                = null;
+            _itinEditSnapshot            = null;
             selectedMultiDatesArray      = [];
             itinSelectedCategorySequence = [];
 
             document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
             toggleItineraryCreationDrawerForm(false);
-            renderItineraryMasterDashboardWorkspace();
 
-            const totalSpots = newItinerary.days.reduce((sum, d) => sum + d.timeline.length, 0);
+            // After a rebuild navigate straight into the updated expanded timeline;
+            // after a fresh build fall back to the master list as before.
+            if (_wasEditing) {
+                openItineraryDetailView(_rebuiltId);
+            } else {
+                renderItineraryMasterDashboardWorkspace();
+            }
+
             if (typeof showFormErrorSpeechBubble === 'function') {
                 showFormErrorSpeechBubble([
-                    `"${newItinerary.title}" created — ${newItinerary.days.length} ` +
-                    `day${newItinerary.days.length > 1 ? 's' : ''}, ` +
-                    `${totalSpots} spot${totalSpots !== 1 ? 's' : ''}!`
+                    _wasEditing
+                        ? `"${_builtTitle}" rebuilt — ${_dayCount} day${_dayCount !== 1 ? 's' : ''}, ${_totalSpots} spot${_totalSpots !== 1 ? 's' : ''}!`
+                        : `"${_builtTitle}" created — ${_dayCount} day${_dayCount !== 1 ? 's' : ''}, ${_totalSpots} spot${_totalSpots !== 1 ? 's' : ''}!`
                 ]);
             }
 

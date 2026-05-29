@@ -246,6 +246,32 @@ body {
     100% { transform: scale(1); }
 }
 
+/* ── Suggested extra-days banner — gentle float in the timeline ─────────────── */
+@keyframes suggestedBannerFloat {
+    0%, 100% { transform: translateY(0px);   }
+    50%       { transform: translateY(-5px);  }
+}
+.suggested-banner-float {
+    animation: suggestedBannerFloat 3.6s ease-in-out infinite;
+    will-change: transform;
+}
+
+/* ── Packed-day indicator — slow breathing red border glow on the day nav bar ── */
+@keyframes packedDayBreathe {
+    0%, 100% {
+        box-shadow: 0 0 0px 0px rgba(239, 68, 68, 0);
+        border-color: rgba(239, 68, 68, 0.22);
+    }
+    50% {
+        box-shadow: 0 0 10px 2px rgba(239, 68, 68, 0.18), inset 0 0 6px 0 rgba(239, 68, 68, 0.06);
+        border-color: rgba(239, 68, 68, 0.45);
+    }
+}
+.itin-packed-day-nav {
+    animation: packedDayBreathe 2.8s ease-in-out infinite;
+    border-color: rgba(239, 68, 68, 0.22) !important;
+}
+
 /* Thematic Pink Gradient Pulse Glow Effect */
 .thematic-pink-glow {
     animation: pinkGlowPulse 0.8s ease-in-out;
@@ -446,15 +472,173 @@ body {
 .weather-wave-icon.wave-2 { animation-delay: 1s; }
 .weather-wave-icon.wave-3 { animation-delay: 2s; }
 
-/* ── Map Weather Widget — "Feels Like" bus-ticker scroll ────────────────────
-   The span starts just beyond the right edge of its overflow-hidden container
-   (left: 105% of parent width) and exits off the left (left: -105%).
-   Using left% (parent-relative) gives correct clipping at any text width.
-   8 s duration keeps the scroll slow and readable. */
+/* ── Map Weather Widget — "Feels Like" seamless marquee ─────────────────────
+   The element holds two identical copies of the ticker text side-by-side.
+   Animating translateX(0 → -50%) shifts exactly one copy's width so the loop
+   point is visually identical to the start — no jump, no empty gap.
+   padding-right on each span provides consistent spacing at the seam.        */
 @keyframes weatherTickerScroll {
-    0%   { left:  105%; }
-    100% { left: -105%; }
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
 }
 .weather-ticker-anim {
-    animation: weatherTickerScroll 8s linear infinite;
+    display: flex;
+    width: max-content;
+    will-change: transform;
+    animation: weatherTickerScroll 12s linear infinite;
 }
+
+/* ── Custom Itinerary Time Picker — Drum-Roll ───────────────────────────────
+   Each column (.itin-drum-wrap) is a fixed-height viewport.
+   The scrollable inner div (.itin-drum-scroll) uses CSS scroll-snap so items
+   always land centred.  Gradient divs (fade-top / fade-bot) overlay the outer
+   rows to create the receding drum-roll depth effect.
+   The highlight div (.itin-drum-highlight) sits at the centre zone and renders
+   the pink selection band without touching the scrollable DOM.
+──────────────────────────────────────────────────────────────────────────── */
+
+/* Container — fixed viewport, clips everything outside */
+.itin-drum-wrap {
+    position: relative;
+    height: 220px;
+    overflow: hidden;
+    border-radius: 14px;
+}
+
+/* Scrollable drum — hides native scrollbar, snaps each row to centre */
+.itin-drum-scroll {
+    height: 220px;
+    overflow-y: scroll;
+    scroll-snap-type: y mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    position: relative;
+    z-index: 0;
+}
+.itin-drum-scroll::-webkit-scrollbar { display: none; }
+
+/* Invisible padding rows that let the first and last real items centre */
+.itin-drum-pad {
+    height: 44px;
+    flex-shrink: 0;
+    pointer-events: none;
+}
+
+/* Each selectable row */
+.itin-drum-item {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    font-weight: 900;
+    font-family: ui-monospace, 'Cascadia Code', 'SF Mono', monospace;
+    color: rgb(51 65 85);               /* slate-700 — dim unselected */
+    scroll-snap-align: center;
+    cursor: pointer;
+    user-select: none;
+    letter-spacing: 0.04em;
+    /* Only transition colour — transform is owned by --active and drum-pop */
+    transition: color 0.1s ease;
+}
+
+/* Centre-snapped (active) row — highlighted by JS on scroll */
+.itin-drum-item--active {
+    color: rgb(236 72 153);             /* pink-500 */
+    transform: scale(1.1);
+}
+
+/* Selection pop: plays on the newly-centred item when scroll settles.
+   Sequence: active size → dip → bounce → settle at active size.
+   Animation overrides the transition so transform is fully controlled here. */
+@keyframes drumItemPop {
+    0%   { transform: scale(1.10); }
+    28%  { transform: scale(0.91); }
+    62%  { transform: scale(1.16); }
+    82%  { transform: scale(1.07); }
+    100% { transform: scale(1.10); }
+}
+.itin-drum-item--active.drum-pop {
+    animation: drumItemPop 0.26s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* Pink selection band — absolutely positioned at the centre of the viewport.
+   centre = 220/2 = 110 px; item half-height = 22 px → top = 88 px */
+.itin-drum-highlight {
+    position: absolute;
+    top:   88px;
+    left:  6px;
+    right: 6px;
+    height: 44px;
+    border-radius: 10px;
+    border-top:    1px solid rgba(236, 72, 153, 0.28);
+    border-bottom: 1px solid rgba(236, 72, 153, 0.28);
+    background: linear-gradient(135deg,
+        rgba(236, 72,  153, 0.07) 0%,
+        rgba(168, 85,  247, 0.07) 100%);
+    z-index: 1;
+    pointer-events: none;
+}
+
+/* Top fade — hides upper rows and creates depth */
+.itin-drum-fade-top {
+    position: absolute;
+    top:   0;
+    left:  0;
+    right: 0;
+    height: 88px;
+    background: linear-gradient(to bottom, rgb(15 23 42) 0%, rgba(15,23,42,0) 100%);
+    z-index: 2;
+    pointer-events: none;
+    border-radius: 14px 14px 0 0;
+}
+
+/* Bottom fade */
+.itin-drum-fade-bot {
+    position: absolute;
+    bottom: 0;
+    left:   0;
+    right:  0;
+    height: 88px;
+    background: linear-gradient(to top, rgb(15 23 42) 0%, rgba(15,23,42,0) 100%);
+    z-index: 2;
+    pointer-events: none;
+    border-radius: 0 0 14px 14px;
+}
+
+/* ── Saved Spots list card transition animations ─────────────────────────────
+   Used by renderListAnimated() in aap.js.
+   Flash keyframes run on .flip-card-front-face (which carries the border-radius)
+   so box-shadow corners are correctly rounded.
+   FLIP motion is applied directly via inline style transitions on .dynamic-card-node.
+──────────────────────────────────────────────────────────────────────────── */
+
+/* Mark Done → slate ripple */
+@keyframes listCardDoneFlash {
+    0%   { box-shadow: 0 0 0 0   rgba(100,116,139,0.55); }
+    35%  { box-shadow: 0 0 0 10px rgba(100,116,139,0.18); }
+    100% { box-shadow: 0 0 0 18px rgba(100,116,139,0);    }
+}
+/* Mark Starred → amber glow */
+@keyframes listCardStarFlash {
+    0%   { box-shadow: 0 0 0 0   rgba(251,191,36,0.65); }
+    35%  { box-shadow: 0 0 0 12px rgba(251,191,36,0.22); }
+    100% { box-shadow: 0 0 0 20px rgba(251,191,36,0);    }
+}
+/* Undo (mark Pending) → pink ripple */
+@keyframes listCardUndoFlash {
+    0%   { box-shadow: 0 0 0 0   rgba(236,72,153,0.55); }
+    35%  { box-shadow: 0 0 0 10px rgba(236,72,153,0.18); }
+    100% { box-shadow: 0 0 0 18px rgba(236,72,153,0);    }
+}
+
+.card-flash-done .flip-card-front-face { animation: listCardDoneFlash 0.48s ease-out forwards; }
+.card-flash-star .flip-card-front-face { animation: listCardStarFlash 0.52s ease-out forwards; }
+.card-flash-undo .flip-card-front-face { animation: listCardUndoFlash 0.48s ease-out forwards; }
+
+/* Extend star flash to itinerary surfaces that don't use flip-card-front-face */
+.card-flash-star.itin-timeline-card { animation: listCardStarFlash 0.52s ease-out forwards; }
+.card-flash-star.itin-master-card   { animation: listCardStarFlash 0.52s ease-out forwards; }
+/* Smooth glow transition on itinerary master cards (mirrors itin-timeline-card rule at line 180) */
+.itin-master-card { transition: border-color 0.3s ease, box-shadow 0.3s ease; }

@@ -991,7 +991,9 @@ function renderSingleMarkerElement(spot, latOffset, lonOffset) {
     
     const finalLat = parseFloat(spot.latitude) + latOffset;
     const finalLon = parseFloat(spot.longitude) + lonOffset;
-    const leafMarker = L.marker([finalLat, finalLon], { icon: customMarkerIcon });
+    // Starred pins get a large zIndexOffset so they always render on top of
+    // non-starred pins when spots overlap or are fanned out from a cluster.
+    const leafMarker = L.marker([finalLat, finalLon], { icon: customMarkerIcon, zIndexOffset: isStarred ? 1000 : 0 });
 
     leafMarker.on('click', (event) => {
         L.DomEvent.stopPropagation(event);
@@ -1100,9 +1102,6 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
         ticketRow.classList.add('hidden');
     }
 
-    const starredBadge = document.getElementById('trayStarredBadge');
-    if (isStarredBool) starredBadge.classList.remove('hidden'); else starredBadge.classList.add('hidden');
-
     // Apply / remove golden glow on both tray faces to match the list card treatment
     const trayFaces = document.querySelectorAll('#mapDetailTrayHUD .flip-card-front-face, #mapDetailTrayHUD .flip-card-back-face');
     trayFaces.forEach(face => {
@@ -1129,15 +1128,21 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
         const nowStarred = !isStarredBool;
         isStarredBool = nowStarred;   // update the closure variable so repeated taps stay correct
 
-        // Badge
-        if (nowStarred) starredBadge.classList.remove('hidden');
-        else starredBadge.classList.add('hidden');
-
         // Golden glow on both faces
         trayFaces.forEach(face => {
             if (nowStarred) face.classList.add('starred-gold-glow');
             else face.classList.remove('starred-gold-glow');
         });
+
+        // Fire the amber burst on the front face when starring (not unstarring)
+        if (nowStarred) {
+            const _trayEl = document.getElementById('mapDetailTrayHUD');
+            if (_trayEl) {
+                _trayEl.classList.add('card-flash-star');
+                const _frontFace = _trayEl.querySelector('.flip-card-front-face');
+                (_frontFace || _trayEl).addEventListener('animationend', () => _trayEl.classList.remove('card-flash-star'), { once: true });
+            }
+        }
 
         // Button label
         starBtn.innerHTML = nowStarred ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star';
@@ -1170,6 +1175,86 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
         warningCard.classList.remove('hidden');
     } else {
         warningCard.classList.add('hidden');
+    }
+
+    // ── Done-state treatment ──────────────────────────────────────────────────
+    // Every interactive element is dimmed/greyed individually — no parent filter,
+    // which would also dim the Undo button.  Only Undo stays fully active.
+    // Mirrors the done-card approach used in the expanded itinerary timeline.
+    const _frontFace = tray.querySelector('.flip-card-front-face');
+    const _refBtn    = document.getElementById('trayOpenReferenceBtn');
+    const _flipBtn   = document.getElementById('trayFlipToBackBtn');
+    const _distBadge = document.getElementById('trayDistanceBadge');
+
+    if (isDone) {
+        // Tray card — subtle grey bg (same values as itin-done-card CSS rule)
+        if (_frontFace) {
+            _frontFace.style.backgroundColor = 'rgba(15,23,42,0.60)';
+            _frontFace.style.borderColor     = 'rgba(100,116,139,0.18)';
+        }
+
+        // Badges — wash out
+        ['trayCityBadge','trayStarredBadge','trayBookedBadge'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.opacity = '0.35';
+        });
+        if (trayWeatherBadge) trayWeatherBadge.style.opacity = '0.30';
+
+        // Distance badge — strip pink/amber, go grey
+        if (_distBadge) _distBadge.className =
+            'text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-slate-800/20 text-slate-600 opacity-40';
+
+        // Open Reference — strip gradient, grey + no-click
+        if (_refBtn) _refBtn.className =
+            'flex-1 bg-slate-800/40 border border-slate-700/30 text-slate-600 text-center text-xs font-bold py-3.5 rounded-xl flex items-center justify-center opacity-40 pointer-events-none';
+
+        // Directions — grey + no-click
+        actionBtn.className =
+            'px-4 bg-slate-800/30 border border-slate-700/20 text-slate-600 flex items-center justify-center rounded-xl text-xs font-bold h-12 whitespace-nowrap opacity-40 pointer-events-none';
+
+        // Ticket row — hide when done
+        const _ticketRow = document.getElementById('trayTicketRow');
+        if (_ticketRow) _ticketRow.classList.add('hidden');
+
+        // Extra Info flip button — grey + no-click
+        if (_flipBtn) _flipBtn.className =
+            'text-slate-600 bg-slate-950/50 border border-slate-800/30 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto opacity-40 pointer-events-none';
+
+        // Star toggle — grey + no-click
+        starBtn.className =
+            'text-xs px-3 py-2 font-black rounded-lg bg-slate-950/50 border border-slate-800/30 text-slate-600 opacity-40 pointer-events-none';
+
+        // Undo — muted pink, fully active (matches itinerary card done-state Undo)
+        doneBtn.className =
+            'text-xs px-3 py-2 font-bold rounded-lg bg-pink-600/10 border border-pink-600/20 text-pink-400 active:bg-pink-600/20';
+
+    } else {
+        // Normal state — restore all defaults
+        if (_frontFace) {
+            _frontFace.style.backgroundColor = '';
+            _frontFace.style.borderColor     = '';
+        }
+        ['trayCityBadge','trayStarredBadge','trayBookedBadge'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.opacity = '';
+        });
+        if (trayWeatherBadge) trayWeatherBadge.style.opacity = '';
+
+        // distBadge already set to its correct class (pink/amber) above
+
+        if (_refBtn) _refBtn.className =
+            'flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg';
+
+        // actionBtn class already set correctly above (Directions / warning branch)
+
+        if (_flipBtn) _flipBtn.className =
+            'text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20';
+
+        starBtn.className =
+            'text-xs px-3 py-2 font-black rounded-lg bg-slate-950 border border-slate-800 text-amber-400 active:bg-slate-800';
+
+        doneBtn.className =
+            'text-xs px-3 py-2 font-bold rounded-lg bg-slate-950 border border-slate-800 text-slate-300 active:bg-slate-800';
     }
 
     tray.classList.remove('hidden');
@@ -1322,9 +1407,10 @@ function _applyMapWeatherData(w) {
         `<span class="text-[10px] font-black uppercase tracking-wider text-slate-300 shrink-0 leading-none">${w.temp}°C</span>` +
         `<div class="w-px h-3 bg-slate-700 shrink-0"></div>` +
         `<div class="flex-1 overflow-hidden relative" style="height:1.1em">` +
-            `<span class="absolute whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-slate-500 weather-ticker-anim" style="top:0;left:105%">` +
-                `Feels like ${w.feelsLike ?? w.temp}°` +
-            `</span>` +
+            `<div class="absolute weather-ticker-anim" style="top:0;left:0">` +
+                `<span class="whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-slate-500" style="padding-right:2.5rem">Feels Like: ${w.feelsLike ?? w.temp}°C</span>` +
+                `<span class="whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-slate-500" style="padding-right:2.5rem">Feels Like: ${w.feelsLike ?? w.temp}°C</span>` +
+            `</div>` +
         `</div>`
     );
 }
